@@ -20,6 +20,16 @@ namespace Win32
         [DllImport("User32.dll", EntryPoint = "SendMessage")]
         public static extern int SendMessage(int hWnd, int msg, int wParam, ref COPYDATASTRUCT lParam);
 
+        [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern IntPtr SendMessageTimeout(
+            int hWnd,
+            int msg,
+            IntPtr wParam,
+            ref COPYDATASTRUCT lParam,
+            uint flags,
+            uint timeout,
+            out IntPtr result);
+
         [DllImport("user32.dll", EntryPoint = "PostMessage")]
         public static extern bool PostMessage(int hWnd, int Msg, int wParam, ref COPYDATASTRUCT lParam);
 

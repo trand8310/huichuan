@@ -2,6 +2,8 @@
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Diagnostics;
+using System.Text;
+using Huichuan.Protocol;
 
 
 namespace CefClient
@@ -49,12 +51,20 @@ namespace CefClient
 
         private void SendTaskMsgHandler(string message)
         {
-            byte[] sarr = System.Text.Encoding.Default.GetBytes(message);
+            byte[] sarr = Encoding.Default.GetBytes(message);
             Win32.COPYDATASTRUCT cds;
-            cds.dwData = (IntPtr)100;
+            cds.dwData = (IntPtr)CefProtocol.CopyDataId;
             cds.lpData = message;
             cds.cbData = sarr.Length + 1;
-            Win32.User.SendMessage(this.hMainWnd, Win32.User.WM_COPYDATA, 0, ref cds);
+            const uint abortIfHung = 0x0002;
+            Win32.User.SendMessageTimeout(
+                this.hMainWnd,
+                Win32.User.WM_COPYDATA,
+                IntPtr.Zero,
+                ref cds,
+                abortIfHung,
+                5000,
+                out _);
         }
         private void OnTaskLogHandler(string message)
         {
@@ -63,34 +73,28 @@ namespace CefClient
 #if DEBUG
                 LogWriteLine(message);
 #endif
-                var data = JsonConvert.SerializeObject(JObject.FromObject(new
-                {
-                    ClientId = clientId,
-                    Msg = "OnTaskLogHandler",
-                    Data = new { Message = message },
-                }));
+                var data = CefProtocol.Serialize(
+                    CefProtocol.Messages.TaskLog,
+                    JObject.FromObject(new { Message = message }),
+                    clientId);
                 SendTaskMsgHandler(data);
             });
 
         }
         private void OnTaskDspHandler(int taskid, int type = 1, int count = 1)
         {
-            var data = JsonConvert.SerializeObject(JObject.FromObject(new
-            {
-                ClientId = clientId,
-                Msg = "OnTaskDspHandler",
-                Data = new { TaskId = taskid, Type = type, Count = count },
-            }));
+            var data = CefProtocol.Serialize(
+                CefProtocol.Messages.TaskDsp,
+                JObject.FromObject(new { TaskId = taskid, Type = type, Count = count }),
+                clientId);
             SendTaskMsgHandler(data);
         }
         private void OnTaskCountHandler(int count)
         {
-            var data = JsonConvert.SerializeObject(JObject.FromObject(new
-            {
-                ClientId = clientId,
-                Msg = "OnTaskCountHandler",
-                Data = count,
-            }));
+            var data = CefProtocol.Serialize(
+                CefProtocol.Messages.TaskCount,
+                JToken.FromObject(count),
+                clientId);
             SendTaskMsgHandler(data);
         }
 
@@ -101,9 +105,9 @@ namespace CefClient
         {
             Task.Run(() =>
             {
-                var message = (JObject)JsonConvert.DeserializeObject(value);
-                var msgName = message["Msg"].Value<string>();
-                if (msgName.Equals("LOAD"))
+                if (!CefProtocol.TryParse(value, out var message, out var msgName))
+                    return;
+                if (msgName.Equals(CefProtocol.Messages.Load, StringComparison.Ordinal))
                 {
                     var args = (JObject)JsonConvert.DeserializeObject(message["Data"].ToString());
                     var taskId = args.SelectToken("task.id").Value<int>();
@@ -136,25 +140,28 @@ namespace CefClient
                         form.Show();
                     }));
                 }
-                else if (msgName.Equals("STOP"))
+                else if (msgName.Equals(CefProtocol.Messages.Stop, StringComparison.Ordinal))
                 {
                     LogWriteLine("5秒后退出该进程");
-                    SpinWait.SpinUntil(() => false, 5000);
-                    sync.Post((p) =>
-                    {
-                        System.Environment.Exit(0);
-                    }, null);
+                    _ = StopAsync();
                 }
-                else if (msgName.Equals("SHOW"))
+                else if (msgName.Equals(CefProtocol.Messages.Show, StringComparison.Ordinal))
                 {
                     this.isHiddenMode = false;
                 }
-                else if (msgName.Equals("HIDE"))
+                else if (msgName.Equals(CefProtocol.Messages.Hide, StringComparison.Ordinal))
                 {
                     this.isHiddenMode = true;
                 }
             });
 
+        }
+
+        private async Task StopAsync()
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5));
+            if (!IsDisposed && IsHandleCreated)
+                BeginInvoke(Close);
         }
 
         protected override void DefWndProc(ref System.Windows.Forms.Message m)
@@ -218,15 +225,12 @@ namespace CefClient
         private void SendRegMessage()
         {
             var currentProcess = Process.GetCurrentProcess();
-            var message = JsonConvert.SerializeObject(JObject.FromObject(new
-            {
-                Msg = "REG",
-                WindowHandle = (int)this.Handle,
-                ClientId = this.clientId,
-                ProcessId = currentProcess.Id,
-                ProcessPath = currentProcess.MainModule.FileName,
-            }));
-            SendTaskMsgHandler(message);
+            var message = CefProtocol.Create(CefProtocol.Messages.Register);
+            message["WindowHandle"] = (int)this.Handle;
+            message["ClientId"] = this.clientId;
+            message["ProcessId"] = currentProcess.Id;
+            message["ProcessPath"] = currentProcess.MainModule?.FileName;
+            SendTaskMsgHandler(message.ToString(Formatting.None));
         }
         private void MainForm_Load(object sender, EventArgs e)
         {
