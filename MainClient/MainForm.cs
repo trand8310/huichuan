@@ -1877,7 +1877,6 @@ namespace MainClient
         /// </summary>
         private static string GetSharedClientExecutable()
         {
-            token.ThrowIfCancellationRequested();
             var sourceRoot = Path.GetFullPath(
                 Path.Combine(AppContext.BaseDirectory, "CefClient"));
 

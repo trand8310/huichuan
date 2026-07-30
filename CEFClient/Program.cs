@@ -51,8 +51,8 @@ namespace CefClient
             Cef.EnableWaitForBrowsersToClose();
             var settings = new CefSettings
             {
-                RootCachePath = CefCachePaths.RootCachePath,
-                CachePath = Path.Combine(CefCachePaths.RootCachePath, "global-cache"),
+                //RootCachePath = CefCachePaths.RootCachePath,
+                //CachePath = Path.Combine(CefCachePaths.RootCachePath, "global-cache"),
                 //RootCachePath = CefCachePaths.RootCachePath,
                 //CachePath = string.Empty,
                 PersistSessionCookies = false,
