@@ -40,7 +40,12 @@ namespace MainClient
                     logBuilder.SetMinimumLevel(LogLevel.Trace);
                     logBuilder.AddLog4Net("log4net.config");
                 });
-            var host = builder.Build();
+            using var host = builder.Build();
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (_, e) =>
+                CreateProgramLogger(host).LogCritical(e.Exception, "未处理的 UI 线程异常");
+            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+                CreateProgramLogger(host).LogCritical(e.ExceptionObject as Exception, "未处理的应用程序异常");
             using (var serviceScope = host.Services.CreateScope())
             {
                 var services = serviceScope.ServiceProvider;
@@ -51,9 +56,14 @@ namespace MainClient
                 }
                 catch (Exception ex)
                 {
-                    Debug.WriteLine(ex.Message);
+                    services.GetRequiredService<ILoggerFactory>()
+                        .CreateLogger("Program")
+                        .LogCritical(ex, "MainClient 异常退出");
                 }
             }
         }
+
+        private static ILogger CreateProgramLogger(IHost host) =>
+            host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Program");
     }
 }

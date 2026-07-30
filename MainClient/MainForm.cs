@@ -16,6 +16,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using System.Win32;
+using Huichuan.Protocol;
 
 namespace MainClient
 {
@@ -30,7 +31,9 @@ namespace MainClient
         private readonly IpHelper _ipHelper = null;
         private readonly ProxyTester _ipTester;
         private int mainWnd = 0;
-        private CancellationTokenSource cts = null;
+        private CancellationTokenSource? cts;
+        private readonly SemaphoreSlim runStateGate = new(1, 1);
+        private Task? runTask;
         private SynchronizationContext sync;
         /// <summary>
         /// 标记应用程序是否重启
@@ -132,6 +135,8 @@ namespace MainClient
 
         public void LogDetailInfo(string message)
         {
+            if (IsDisposed || Disposing || !IsHandleCreated)
+                return;
             if (InvokeRequired)
             {
                 Invoke((MethodInvoker)(() => { LogDetailInfo(message); }));
@@ -148,9 +153,12 @@ namespace MainClient
         #region 消息解析
         private void ResolveMessage(string value)
         {
-            var message = (JObject)JsonConvert.DeserializeObject(value);
-            var msgName = message["Msg"].ToString();
-            if (msgName.Equals("REG"))
+            if (!CefProtocol.TryParse(value, out var message, out var msgName))
+            {
+                LogWriteLine("忽略无效的 CefClient 消息");
+                return;
+            }
+            if (msgName.Equals(CefProtocol.Messages.Register, StringComparison.Ordinal))
             {
                 var clientId = message["ClientId"].ToString();
                 var windowHandle = Convert.ToInt32(message["WindowHandle"].ToString());
@@ -163,7 +171,7 @@ namespace MainClient
                     });
                 }
             }
-            else if (msgName.Equals("OnTaskCountHandler"))
+            else if (msgName.Equals(CefProtocol.Messages.TaskCount, StringComparison.Ordinal))
             {
                 var clientId = message["ClientId"].ToString();
                 if (this.processOfList.TryGetValue(clientId, out var client))
@@ -175,7 +183,7 @@ namespace MainClient
                     });
                 }
             }
-            else if (msgName.Equals("OnTaskDspHandler"))
+            else if (msgName.Equals(CefProtocol.Messages.TaskDsp, StringComparison.Ordinal))
             {
                 var taskId = message.SelectToken("Data.TaskId").Value<int>();
                 if (message.SelectToken("Data.Type").Value<int>() == 2)
@@ -191,7 +199,7 @@ namespace MainClient
                     Interlocked.Increment(ref this.TotalDspCount);
                 }
             }
-            else if (msgName.Equals("OnTaskLogHandler"))
+            else if (msgName.Equals(CefProtocol.Messages.TaskLog, StringComparison.Ordinal))
             {
                 if (_appSettings.Value.IsDetailLog)
                 {
@@ -203,17 +211,23 @@ namespace MainClient
 
         private static void SendCefLoadMessage(ConsumerModel consumer, JObject args)
         {
-            var message = JsonConvert.SerializeObject(JObject.FromObject(new
-            {
-                Msg = "LOAD",
-                Data = args,
-            }));
-            byte[] buffer = System.Text.Encoding.Default.GetBytes(message);
+            var message = CefProtocol.Serialize(CefProtocol.Messages.Load, args);
+            byte[] buffer = Encoding.Default.GetBytes(message);
             COPYDATASTRUCT cds;
-            cds.dwData = (IntPtr)100;
+            cds.dwData = (IntPtr)CefProtocol.CopyDataId;
             cds.lpData = message;
             cds.cbData = buffer.Length + 1;
-            NativeMethod.SendMessage(consumer.ClientWindowHandle, NativeMethod.WM_COPYDATA, 0, ref cds);
+            const uint abortIfHung = 0x0002;
+            var sent = NativeMethod.SendMessageTimeout(
+                consumer.ClientWindowHandle,
+                NativeMethod.WM_COPYDATA,
+                IntPtr.Zero,
+                ref cds,
+                abortIfHung,
+                5000,
+                out _);
+            if (sent == IntPtr.Zero)
+                throw new TimeoutException($"向 CefClient 窗口 {consumer.ClientWindowHandle} 发送消息失败或超时。");
         }
 
 
@@ -258,6 +272,7 @@ namespace MainClient
             this._appSettings = appSettings;
             this._logger = logger;
             this._httpClientFactory = httpClientFactory;
+            FormClosing += MainForm_FormClosing;
             this.Text += $"{AppConsts.AppVertion}";
             this.sync = SynchronizationContext.Current;
             LoadAppSetting();
@@ -308,6 +323,28 @@ namespace MainClient
                 this.NumberOfLogicalProcessors = Int32.Parse(item["NumberOfLogicalProcessors"].ToString());
             }
             #endregion
+        }
+        private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
+        {
+            isRunning = false;
+            isProcessingLogs = false;
+            cts?.Cancel();
+
+            foreach (var consumer in processOfList.Values)
+            {
+                try
+                {
+                    using var process = Process.GetProcessById(consumer.ProcessId);
+                    if (!process.HasExited)
+                        process.Kill(entireProcessTree: true);
+                }
+                catch (ArgumentException) { }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception ex)
+                {
+                    _logger.LogWarning(ex, "关闭窗口时终止 CefClient {ProcessId} 失败", consumer.ProcessId);
+                }
+            }
         }
         private void MainForm_Load(object sender, EventArgs e)
         {
@@ -446,7 +483,7 @@ namespace MainClient
         }
         #endregion
 
-        private ConcurrentDictionary<string, ConsumerModel> processOfList;
+        private readonly ConcurrentDictionary<string, ConsumerModel> processOfList = new();
 
 
 
@@ -544,6 +581,7 @@ namespace MainClient
         /// <returns></returns>
         private async Task SaveAppState()
         {
+            Directory.CreateDirectory("./Logs");
             var rundatFile = @"./Logs/run_" + System.DateTime.Today.ToString("yyyyMMdd") + "_" + _appSettings.Value.TaskName + ".dat";
             var runData = JObject.FromObject(new
             {
@@ -583,25 +621,44 @@ namespace MainClient
                 await System.IO.File.AppendAllTextAsync(rundatFile, $"{JsonConvert.SerializeObject(runData, Newtonsoft.Json.Formatting.None)}{System.Environment.NewLine}");
         }
 
-        private void buttonStart_Click(object sender, EventArgs e)
+        private async void buttonStart_Click(object sender, EventArgs e)
         {
-            if (buttonStart.Text.Equals("停止"))
+            await runStateGate.WaitAsync();
+            try
             {
-                isRestart = false;
-                isRunning = false;
-                isProcessingLogs = false;
-                this.cts.Cancel();
-                return;
+                if (runTask is { IsCompleted: false })
+                {
+                    await RequestStopAsync(restart: false);
+                    return;
+                }
+
+                await StartRunAsync();
             }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "切换运行状态失败");
+                LogWriteLine($"切换运行状态失败：{ex}");
+                SetRunUi(false);
+            }
+            finally
+            {
+                runStateGate.Release();
+            }
+        }
+
+        private Task StartRunAsync()
+        {
             if (!File.Exists(System.IO.Path.Combine(System.AppDomain.CurrentDomain.SetupInformation.ApplicationBase, "CefClient", "CefClient.exe")))
             {
                 MessageBox.Show("CefClient.exe不存在!");
-                return;
+                return Task.CompletedTask;
             }
+
+            var concurrency = Math.Max(1, _appSettings.Value.MaximumConcurrency);
+            var capacity = Math.Max(concurrency, _appSettings.Value.MaximumCacheCount);
             ProcessLogs();
             isRestart = false;
             isRunning = true;
-            CommonHelper.ClearProcesses(new string[] { "CefClient", "CefSharp.BrowserSubprocess", "WerFault" });
             CommonHelper.ClearAllErrorMsgDialog();
             this.GetTaskCount = 0;
             this.RequestCount = 0;
@@ -609,114 +666,82 @@ namespace MainClient
             this.DspCount = 0;
             this.DspClickCount = 0;
             this.mainWnd = (int)this.Handle;
-            this.processOfList = new ConcurrentDictionary<string, ConsumerModel>();
             this.processOfList.Clear();
-            buttonStart.Text = "停止";
-            buttonStart.ForeColor = Color.Blue;
-            buttonClear.Enabled = false;
-            if (_appSettings.Value.MaximumCacheCount == 0)
-                _appSettings.Value.MaximumCacheCount = 32;
-
-
-
             sw.Reset();
             sw.Start();
-            this.cts = new CancellationTokenSource();
-            this.cts.Token.Register(() =>
-            {
-                this.BeginInvoke(new MethodInvoker(() =>
-                {
-                    buttonStart.Enabled = false;
-                    buttonStart.Text = this.isRestart ? "重启中..." : "停止中...";
-                    buttonStart.ForeColor = Color.Black;
-                }));
-            });
+            cts?.Dispose();
+            cts = new CancellationTokenSource();
+            SetRunUi(true);
+            runTask = RunSessionAsync(concurrency, capacity, cts.Token);
+            return Task.CompletedTask;
+        }
 
-            Task.Factory.StartNew(async () =>
+        private async Task RequestStopAsync(bool restart)
+        {
+            isRestart = restart;
+            isRunning = false;
+            isProcessingLogs = false;
+            buttonStart.Enabled = false;
+            buttonStart.Text = restart ? "重启中..." : "停止中...";
+            buttonStart.ForeColor = Color.Black;
+            cts?.Cancel();
+
+            var completion = runTask;
+            if (completion is not null)
             {
-                var channel = Channel.CreateBounded<JObject>(
-                    new BoundedChannelOptions(_appSettings.Value.MaximumConcurrency * _appSettings.Value.Multiple)
+                await completion;
+            }
+        }
+
+        private async Task RunSessionAsync(int concurrency, int capacity, CancellationToken token)
+        {
+            var channel = Channel.CreateBounded<JObject>(
+                    new BoundedChannelOptions(capacity)
                     {
                         SingleWriter = true,
                         SingleReader = false,
                         FullMode = BoundedChannelFullMode.Wait
                     });
 
+            try
+            {
+                var tasks = new List<Task>(concurrency + 3)
+                {
+                    ProduceWithWhileAndTryWrite(channel.Writer, token),
+                    RefreshStatisticsAsync(token),
+                    MonitorRunLifetimeAsync(token)
+                };
+                for (var index = 1; index <= concurrency; index++)
+                {
+                    tasks.Add(ConsumerAsync(channel.Reader, index, token));
+                }
+
+                await Task.WhenAll(tasks);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // 用户停止和计划重启均为正常控制流。
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "运行会话异常退出");
+                LogWriteLine($"运行会话异常退出：{ex}");
+            }
+            finally
+            {
+                isRunning = false;
+                isProcessingLogs = false;
+                sw.Stop();
                 try
                 {
-                    _ = Task.Run(async () =>
-                    {
-                        while (!this.cts.IsCancellationRequested)
-                        {
-
-                            UpdateStatInfo();
-                            await Task.Delay(1000);
-                        }
-                    });
-
-                    _ = Task.Run(async () =>
-                    {
-                        while (!this.cts.IsCancellationRequested)
-                        {
-                            await Task.Delay(5 * 1000);
-                            await _adxHelper.UpdateTaskStat();
-
-                        }
-                    });
-
-                    _ = Task.Run(() =>
-                    {
-                        int timeout = _appSettings.Value.MainResetTimeout * 60 + CommonHelper.RandomRange(-5, 5);
-                        while (!this.isRestart && this.isRunning && !this.cts.IsCancellationRequested)
-                        {
-                            try
-                            {
-                                var process = Process.GetCurrentProcess();
-                                var totalSeconds = (int)(((TimeSpan)(System.DateTime.Now - process.StartTime)).TotalSeconds);
-                                if (_appSettings.Value.MainResetTimeout > 0 && totalSeconds > timeout)
-                                {
-                                    LogWriteLine("重启任务");
-                                    this.isRestart = true;
-                                    this.isRunning = false;
-                                    this.isProcessingLogs = false;
-                                    this.cts.Cancel();
-                                    break;
-                                }
-                                CommonHelper.ClearAllErrorMsgDialog();
-                            }
-                            catch (Exception)
-                            {
-
-                            }
-                            SpinWait.SpinUntil(() => this.cts.IsCancellationRequested || this.isRestart || !this.isRunning, 5 * 1000);
-                        }
-                    });
-
-                    var producer = ProduceWithWhileAndTryWrite(channel.Writer, this.cts.Token);
-
-                    var consumer = Parallel.ForEachAsync(Enumerable.Range(1, _appSettings.Value.MaximumConcurrency),
-                        new ParallelOptions()
-                        {
-                            MaxDegreeOfParallelism = _appSettings.Value.MaximumConcurrency,
-                            CancellationToken = this.cts.Token
-                        },
-                        async (index, ct) =>
-                        {
-                            await ConsumeWithNestedWhileAsync(channel.Reader, index, ct);
-                        });
-                    await Task.WhenAll(consumer, producer);
-                }
-                catch (TaskCanceledException)
-                {
-                    LogWriteLine("TaskCanceledException");
+                    await _adxHelper.UpdateTaskStat();
+                    await SaveAppState();
                 }
                 catch (Exception ex)
                 {
-                    LogWriteLine(ex.Message);
+                    _logger.LogError(ex, "保存运行状态失败");
+                    LogWriteLine($"保存运行状态失败：{ex.Message}");
                 }
-                await _adxHelper.UpdateTaskStat();
-                //保存任务状态
-                await SaveAppState();
                 if (isRestart)
                 {
                     sync.Post((p) =>
@@ -724,17 +749,52 @@ namespace MainClient
                         CommonHelper.ProcessRestart();
                     }, null);
                 }
-                else if (!this.isRunning)
+                else
                 {
-                    this.sync.Post(p =>
+                    if (!IsDisposed && !Disposing)
                     {
-                        this.buttonClear.Enabled = true;
-                        this.buttonStart.Enabled = true;
-                        this.buttonStart.Text = "开始";
-                        this.buttonStart.ForeColor = Color.Black;
-                    }, null);
+                        this.sync.Post(p => SetRunUi(false), null);
+                    }
                 }
-            }, TaskCreationOptions.LongRunning);
+            }
+        }
+
+        private async Task RefreshStatisticsAsync(CancellationToken token)
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+            var ticks = 0;
+            while (await timer.WaitForNextTickAsync(token))
+            {
+                UpdateStatInfo();
+                if (++ticks % 5 == 0)
+                    await _adxHelper.UpdateTaskStat();
+            }
+        }
+
+        private async Task MonitorRunLifetimeAsync(CancellationToken token)
+        {
+            var minutes = _appSettings.Value.MainResetTimeout;
+            if (minutes <= 0)
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                return;
+            }
+
+            var seconds = Math.Max(1, (long)minutes * 60 + Random.Shared.Next(-5, 6));
+            await Task.Delay(TimeSpan.FromSeconds(seconds), token);
+            LogWriteLine("达到主进程重启周期，准备重启任务");
+            isRestart = true;
+            isRunning = false;
+            isProcessingLogs = false;
+            cts?.Cancel();
+        }
+
+        private void SetRunUi(bool running)
+        {
+            buttonClear.Enabled = !running;
+            buttonStart.Enabled = true;
+            buttonStart.Text = running ? "停止" : "开始";
+            buttonStart.ForeColor = running ? Color.Blue : Color.Black;
         }
         private void buttonClear_Click(object sender, EventArgs e)
         {
@@ -795,7 +855,9 @@ namespace MainClient
                 {
                     try
                     {
-                        var content = await this._adxHelper.GetTaskAsync($"{_appSettings.Value.TaskApiUrl}?type=1&action=getTask&task={_appSettings.Value.TaskName}&test=0&_t={System.DateTime.Now.Ticks}");
+                        var content = await this._adxHelper.GetTaskAsync(
+                            $"{_appSettings.Value.TaskApiUrl}?type=1&action=getTask&task={_appSettings.Value.TaskName}&test=0&_t={System.DateTime.Now.Ticks}",
+                            token);
                         if (!string.IsNullOrWhiteSpace(content))
                         {
                             if (content.Equals("empty"))
@@ -823,19 +885,21 @@ namespace MainClient
 
                                         foreach (JObject task in tasks["task"])
                                         {
-                                            if (await writer.WaitToWriteAsync(token))
-                                            {
-                                                writer.TryWrite(task);
-                                            }
+                                            await writer.WriteAsync((JObject)task.DeepClone(), token);
                                         }
                                     }
                                 }
                             }
                         }
                     }
-                    catch (Exception)
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
                     {
-
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "获取或分发任务失败");
+                        LogWriteLine($"获取或分发任务失败：{ex.Message}");
                     }
                     await Task.Delay(_appSettings.Value.FetchTaskInterval, token);
                 }
@@ -846,7 +910,7 @@ namespace MainClient
             }
             finally
             {
-                writer.Complete();
+                writer.TryComplete();
             }
         }
 
@@ -856,6 +920,7 @@ namespace MainClient
             await _mutex.WaitAsync();
             try
             {
+                Directory.CreateDirectory("./adx");
                 await System.IO.File.AppendAllTextAsync($"./adx/adx_{type}.json", $"{JsonConvert.SerializeObject(adx, Formatting.None)}{System.Environment.NewLine}");
 
             }
@@ -870,7 +935,8 @@ namespace MainClient
             }
         }
 
-        public async Task ConsumeWithNestedWhileAsync(ChannelReader<JObject> reader, int processIndex, CancellationToken token)
+        [Obsolete("兼容旧执行链保留；运行时已统一使用 ConsumerAsync。")]
+        private async Task ConsumeWithNestedWhileAsync(ChannelReader<JObject> reader, int processIndex, CancellationToken token)
         {
             int processedCount = 0;
             int consumedCount = 0;
@@ -1269,10 +1335,6 @@ namespace MainClient
 
 
 
-        private static readonly ConcurrentDictionary<string, SemaphoreSlim> ClientDeployLocks =new(StringComparer.OrdinalIgnoreCase);
-
-        private static readonly ConcurrentDictionary<string, string> ClientPackageTokens = new(StringComparer.OrdinalIgnoreCase);
-
         private sealed record ClientRuntime(
             string ClientId,
             string ExecutablePath,
@@ -1531,6 +1593,11 @@ namespace MainClient
         {
             var workingDirectory = Path.GetDirectoryName(executablePath)
                 ?? throw new InvalidOperationException("无法取得 CefClient 工作目录。");
+            var runtimeRoot = Path.Combine(
+                AppContext.BaseDirectory,
+                "chrome",
+                "instances",
+                $"consumer-{processIndex}");
 
             var startInfo = new ProcessStartInfo
             {
@@ -1548,6 +1615,7 @@ namespace MainClient
                 $"isHiddenMode={_appSettings.Value.IsHiddenMode}");
             startInfo.ArgumentList.Add($"clientId={clientId}");
             startInfo.ArgumentList.Add($"--consumer-id={processIndex}");
+            startInfo.ArgumentList.Add($"--runtime-root={runtimeRoot}");
 
             return startInfo;
         }
@@ -1712,7 +1780,8 @@ namespace MainClient
                     return false;
                 }
 
-                await SaveAdx(adx!, 0);
+                if (_appSettings.Value.PersistAdx)
+                    await SaveAdx(adx!, 0);
 
                 if (!HasAcceptableBid(adx!))
                 {
@@ -1723,7 +1792,8 @@ namespace MainClient
                     return false;
                 }
 
-                await SaveAdx(adx!, 1);
+                if (_appSettings.Value.PersistAdx)
+                    await SaveAdx(adx!, 1);
 
                 var cacheIndex = $"s{processIndex}_{uv}";
                 var clickJump = false;
@@ -2259,14 +2329,9 @@ namespace MainClient
             int processIndex,
             CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             var sourceRoot = Path.GetFullPath(
                 Path.Combine(AppContext.BaseDirectory, "CefClient"));
-
-            var destinationRoot = Path.GetFullPath(
-                Path.Combine(
-                    AppContext.BaseDirectory,
-                    "chrome",
-                    $"CefClient{processIndex}"));
 
             var sourceExecutable = Path.Combine(sourceRoot, "CefClient.exe");
             if (!File.Exists(sourceExecutable))
@@ -2276,101 +2341,14 @@ namespace MainClient
                     sourceExecutable);
             }
 
-            var gate = ClientDeployLocks.GetOrAdd(
-                destinationRoot,
-                static _ => new SemaphoreSlim(1, 1));
-
-            await gate.WaitAsync(token);
-
-            try
-            {
-                var packageToken = ClientPackageTokens.GetOrAdd(
-                    sourceRoot,
-                    ComputeClientPackageToken);
-
-                var destinationExecutable = Path.Combine(
-                    destinationRoot,
-                    "CefClient.exe");
-
-                var markerPath = Path.Combine(
-                    destinationRoot,
-                    ".package-token");
-
-                if (File.Exists(destinationExecutable) &&
-                    File.Exists(markerPath) &&
-                    string.Equals(
-                        await File.ReadAllTextAsync(markerPath, token),
-                        packageToken,
-                        StringComparison.Ordinal))
-                {
-                    return destinationExecutable;
-                }
-
-                var parent = Directory.GetParent(destinationRoot)?.FullName
-                    ?? throw new InvalidOperationException("目标目录没有父目录。");
-
-                Directory.CreateDirectory(parent);
-
-                var stagingRoot = destinationRoot + ".staging-" +
-                                  Guid.NewGuid().ToString("N");
-                var backupRoot = destinationRoot + ".backup-" +
-                                 Guid.NewGuid().ToString("N");
-
-                try
-                {
-                    await CopyDirectoryAsync(
-                        sourceRoot,
-                        stagingRoot,
-                        token);
-
-                    ValidateClientPackage(stagingRoot);
-
-                    await File.WriteAllTextAsync(
-                        Path.Combine(stagingRoot, ".package-token"),
-                        packageToken,
-                        Encoding.UTF8,
-                        token);
-
-                    var movedOldDirectory = false;
-
-                    try
-                    {
-                        if (Directory.Exists(destinationRoot))
-                        {
-                            Directory.Move(destinationRoot, backupRoot);
-                            movedOldDirectory = true;
-                        }
-
-                        Directory.Move(stagingRoot, destinationRoot);
-
-                        if (movedOldDirectory)
-                        {
-                            TryDeleteDirectory(backupRoot);
-                        }
-                    }
-                    catch
-                    {
-                        // 尽量恢复旧版本，避免目标目录消失。
-                        if (!Directory.Exists(destinationRoot) &&
-                            Directory.Exists(backupRoot))
-                        {
-                            Directory.Move(backupRoot, destinationRoot);
-                        }
-
-                        throw;
-                    }
-
-                    return Path.Combine(destinationRoot, "CefClient.exe");
-                }
-                finally
-                {
-                    TryDeleteDirectory(stagingRoot);
-                }
-            }
-            finally
-            {
-                gate.Release();
-            }
+            ValidateClientPackage(sourceRoot);
+            Directory.CreateDirectory(Path.Combine(
+                AppContext.BaseDirectory,
+                "chrome",
+                "instances",
+                $"consumer-{processIndex}"));
+            await Task.CompletedTask;
+            return sourceExecutable;
         }
 
         private static async Task CopyDirectoryAsync(

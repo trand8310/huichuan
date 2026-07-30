@@ -3,6 +3,7 @@ using CefSharp;
 using CefSharp.WinForms;
 using System.Diagnostics;
 using System.Text;
+using Huichuan.Protocol;
 
 namespace CefClient
 {
@@ -12,11 +13,14 @@ namespace CefClient
         [STAThread]
         public static int Main(string[] args)
         {
-            var consumerId = args
-            .FirstOrDefault(x => x.StartsWith("--consumer-id=", StringComparison.OrdinalIgnoreCase))
-            ?.Substring("--consumer-id=".Length);
+            var consumerId = CefProtocol.GetArgument(args, "--consumer-id");
+            var runtimeRoot = CefProtocol.GetArgument(args, "--runtime-root");
 
-            if (!string.IsNullOrWhiteSpace(consumerId))
+            if (!string.IsNullOrWhiteSpace(runtimeRoot))
+            {
+                CefCachePaths.SetRuntimeRoot(runtimeRoot);
+            }
+            else if (!string.IsNullOrWhiteSpace(consumerId))
             {
                 CefCachePaths.RootCachePath = CefCachePaths.GetConsumerRootCachePath(consumerId);
             }
@@ -47,8 +51,8 @@ namespace CefClient
             Cef.EnableWaitForBrowsersToClose();
             var settings = new CefSettings
             {
-                //RootCachePath = CefCachePaths.RootCachePath,
-                //CachePath = CefCachePaths.RootCachePath,
+                RootCachePath = CefCachePaths.RootCachePath,
+                CachePath = Path.Combine(CefCachePaths.RootCachePath, "global-cache"),
                 //RootCachePath = CefCachePaths.RootCachePath,
                 //CachePath = string.Empty,
                 PersistSessionCookies = false,
