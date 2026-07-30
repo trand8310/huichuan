@@ -30,7 +30,9 @@ namespace MainClient.Common
         /// </summary>
         /// <param name="address"></param>
         /// <returns></returns>
-        public async Task<string> GetTaskAsync(string address)
+        public async Task<string?> GetTaskAsync(
+            string address,
+            CancellationToken cancellationToken = default)
         {
             var client = _httpClientFactory.CreateClient();
             try
@@ -38,17 +40,17 @@ namespace MainClient.Common
                 client.Timeout = TimeSpan.FromSeconds(10);
                 client.DefaultRequestHeaders.Accept.Clear();
                 client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                HttpResponseMessage response = await client.GetAsync(address);
+                using HttpResponseMessage response = await client.GetAsync(address, cancellationToken);
                 response.EnsureSuccessStatusCode();
-                if (response.IsSuccessStatusCode)
-                {
-                    return await response.Content.ReadAsStringAsync();
-                }
+                return await response.Content.ReadAsStringAsync(cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
-                Debug.WriteLine(ex.Message);
-
+                _logger.LogWarning(ex, "获取任务失败：{Address}", address);
             }
             return null;
         }
@@ -640,4 +642,3 @@ namespace MainClient.Common
         }
     }
 }
-

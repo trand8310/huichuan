@@ -9,6 +9,12 @@ namespace CefClient.Common
         {
             return System.IO.Path.Combine(new DirectoryInfo(AppDomain.CurrentDomain.BaseDirectory).Parent!.FullName, "User Data", consumerId);
         }
+        public static void SetRuntimeRoot(string path)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(path);
+            RootCachePath = Path.GetFullPath(path);
+            Directory.CreateDirectory(RootCachePath);
+        }
         public static string GetBrowserCachePath(string browserId)
         {
             return Path.Combine(RootCachePath, browserId);
