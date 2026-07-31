@@ -988,35 +988,6 @@ namespace MainClient
                 RefreshStartStopButton(_taskManager.State);
             }
         }
-
-
-
-
-
-
-
-        private async Task MonitorRunLifetimeAsync(CancellationToken token)
-        {
-            var minutes = _appSettings.MainResetTimeout;
-            if (minutes <= 0)
-            {
-                await Task.Delay(Timeout.InfiniteTimeSpan, token);
-                return;
-            }
-
-            var seconds = Math.Max(1, (long)minutes * 60 + Random.Shared.Next(-5, 6));
-            await Task.Delay(TimeSpan.FromSeconds(seconds), token);
-            LogWriteLine("达到主进程重启周期，准备重启任务");
-            cts?.Cancel();
-        }
-
-        private void SetRunUi(bool running)
-        {
-            buttonClear.Enabled = !running;
-            btnStartStop.Enabled = true;
-            btnStartStop.Text = running ? "停止" : "开始";
-            btnStartStop.ForeColor = running ? Color.Blue : Color.Black;
-        }
         private void buttonClear_Click(object sender, EventArgs e)
         {
 
