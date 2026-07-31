@@ -131,6 +131,17 @@ namespace MainClient.Scheduler
         private readonly ConcurrentDictionary<TaskHourKey, SemaphoreSlim> _baselineInitLocks = new();
         private readonly ConcurrentDictionary<TaskHourKey, ClickRatioPlanner> _clickRatioPlanners = new();
 
+        private ClickRatioPlanner GetOrCreateClickPlanner(
+            TaskHourKey key,
+            TrafficTaskStateEntity baseline)
+        {
+            // ClickRatioPlanner.PlanNext owns the synchronization; an additional
+            // external per-planner gate is neither declared nor required here.
+            return _clickRatioPlanners.GetOrAdd(
+                key,
+                _ => new ClickRatioPlanner(baseline.DSP, baseline.Clickthrough));
+        }
+
         private readonly AdxHelper _adxHelper;
         private readonly AppSettings _appSettings;
         private readonly ILogger _logger;
@@ -411,9 +422,7 @@ namespace MainClient.Scheduler
             // All processIndex/UV producers in this MainClient share this singleton
             // service and therefore the same planner for a task/hour. PlanNext is
             // atomic, so concurrent calls reserve distinct global stream positions.
-            var planner = _clickRatioPlanners.GetOrAdd(
-                key,
-                _ => new ClickRatioPlanner(baseline.DSP, baseline.Clickthrough));
+            var planner = GetOrCreateClickPlanner(key, baseline);
             return planner.PlanNext(rate);
         }
 
