@@ -740,6 +740,7 @@ namespace MainClient
             AppSettings appSettings,
             ILogger<MainForm> logger)
         {
+            InitializeComponent();
             _aggregator = aggregator;
             _devHelper = devHelper;
             _adxHelper = adxHelper;
@@ -749,17 +750,14 @@ namespace MainClient
             _logger = logger;
 
             messageQueue = new CopyDataMessageQueue(
-                ResolveMessage,
-                exception => _logger.LogError(exception, "处理 WM_COPYDATA 失败"),
-                Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
+            ResolveMessage,
+            exception => _logger.LogError(exception, "处理 WM_COPYDATA 失败"),
+            Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
 
-
-            InitializeComponent();
             FormClosing += MainForm_FormClosing;
             this.Text += $"{AppConsts.AppVersion}";
             LoadAppSetting();
             InitTaskDispatchManager();
-
             #region 数据初始化
             this.textBox_SmsName.Text = CommonHelper.GetHostName();
             foreach (var item in new ManagementObjectSearcher("Select * from Win32_ComputerSystem").Get())
