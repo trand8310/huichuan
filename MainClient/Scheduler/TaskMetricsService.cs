@@ -107,6 +107,7 @@ namespace MainClient.Scheduler
                         RemoveOtherHours(_taskClickRates, hourKey);
                         RemoveOtherHours(_baselineInitLocks, hourKey);
                         RemoveOtherHours(_clickRatioPlanners, hourKey);
+                        RemoveOtherHours(_clickRatioPlannerLocks, hourKey);
                         Volatile.Write(ref _activeClickHour, hourKey);
                     }
                 }
@@ -130,13 +131,12 @@ namespace MainClient.Scheduler
         private readonly ConcurrentDictionary<TaskHourKey, double> _taskClickRates = new();
         private readonly ConcurrentDictionary<TaskHourKey, SemaphoreSlim> _baselineInitLocks = new();
         private readonly ConcurrentDictionary<TaskHourKey, ClickRatioPlanner> _clickRatioPlanners = new();
+        private readonly ConcurrentDictionary<TaskHourKey, SemaphoreSlim> _clickRatioPlannerLocks = new();
 
         private ClickRatioPlanner GetOrCreateClickPlanner(
             TaskHourKey key,
             TrafficTaskStateEntity baseline)
         {
-            // ClickRatioPlanner.PlanNext owns the synchronization; an additional
-            // external per-planner gate is neither declared nor required here.
             return _clickRatioPlanners.GetOrAdd(
                 key,
                 _ => new ClickRatioPlanner(baseline.DSP, baseline.Clickthrough));
@@ -422,8 +422,20 @@ namespace MainClient.Scheduler
             // All processIndex/UV producers in this MainClient share this singleton
             // service and therefore the same planner for a task/hour. PlanNext is
             // atomic, so concurrent calls reserve distinct global stream positions.
-            var planner = GetOrCreateClickPlanner(key, baseline);
-            return planner.PlanNext(rate);
+            var gate = _clickRatioPlannerLocks.GetOrAdd(
+                key,
+                _ => new SemaphoreSlim(1, 1));
+
+            await gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var planner = GetOrCreateClickPlanner(key, baseline);
+                return planner.PlanNext(rate);
+            }
+            finally
+            {
+                gate.Release();
+            }
         }
 
 
@@ -966,6 +978,9 @@ namespace MainClient.Scheduler
                 _lifecycleLock.Dispose();
 
                 foreach (var gate in _baselineInitLocks.Values)
+                    gate.Dispose();
+
+                foreach (var gate in _clickRatioPlannerLocks.Values)
                     gate.Dispose();
             }
         }
