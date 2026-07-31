@@ -88,6 +88,7 @@ namespace MainClient.Scheduler
         private readonly ConcurrentDictionary<int, TrafficTaskStateEntity> _taskStates = new();
         private readonly ConcurrentDictionary<int, TrafficProxyIpStateEntity> _proxyIpStates = new();
         private readonly TrafficTaskStateEntity _hostTaskStates = new();
+        private readonly TrafficMetricsStore _persistentMetrics;
         public readonly record struct TaskHourKey(int TaskId, string HourKey);
         private readonly object _clickHourRolloverSync = new();
         private string _activeClickHour = GetHourKey();
@@ -135,11 +136,12 @@ namespace MainClient.Scheduler
 
         private ClickRatioPlanner GetOrCreateClickPlanner(
             TaskHourKey key,
-            TrafficTaskStateEntity baseline)
+            long existingDsp,
+            long existingClicks)
         {
             return _clickRatioPlanners.GetOrAdd(
                 key,
-                _ => new ClickRatioPlanner(baseline.DSP, baseline.Clickthrough));
+                _ => new ClickRatioPlanner(existingDsp, existingClicks));
         }
 
         private readonly AdxHelper _adxHelper;
@@ -168,6 +170,10 @@ namespace MainClient.Scheduler
             _adxHelper = adxHelper;
             _appSettings = appSettings;
             _logger = logger;
+            var hourKey = GetHourKey();
+            _persistentMetrics = new TrafficMetricsStore(
+                Path.Combine(AppContext.BaseDirectory, "data", "traffic-metrics.json"),
+                hourKey[..8]);
 
             _retryCount = retryCount < 0 ? 0 : retryCount;
             _maxConcurrentRequests = maxConcurrentRequests <= 0 ? 5 : maxConcurrentRequests;
@@ -332,7 +338,8 @@ namespace MainClient.Scheduler
             if (!TryEnsureStarted())
                 return;
 
-            _taskStateQueue.Writer.TryWrite(ev);
+            if (_taskStateQueue.Writer.TryWrite(ev))
+                _persistentMetrics.Add(GetHourKey(), ev.TaskId, ev.State, ev.Count);
         }
 
         public void EnqueueFetchedIp(int taskId, int count = 1)
@@ -369,7 +376,13 @@ namespace MainClient.Scheduler
         public TrafficTaskUiSnapshot GetHostSnapshot()
         {
             TryEnsureStarted();
-            return _hostTaskStates.ToUiSnapshot(0);
+            return _persistentMetrics.GetHour(GetHourKey());
+        }
+
+        public TrafficTaskUiSnapshot GetTodayHostSnapshot()
+        {
+            TryEnsureStarted();
+            return _persistentMetrics.GetDay(GetHourKey()[..8]);
         }
 
         public TrafficTaskUiSnapshot? GetTaskSnapshot(int taskId)
@@ -401,13 +414,13 @@ namespace MainClient.Scheduler
             var key = GetClickHourKey(taskId);
             await EnsureTaskBaselineAsync(key, taskCtr).ConfigureAwait(false);
             var baseline = _taskGlobalBaseline[key];
-            var stats = _taskStates.GetOrAdd(taskId, _ => new TrafficTaskStateEntity());
+            var persisted = _persistentMetrics.GetHour(key.HourKey, taskId);
 
-            long totalDsp = baseline.DSP + stats.DSP;
+            long totalDsp = Math.Max(baseline.DSP, persisted.Dsp);
             if (totalDsp <= 0)
                 return 0;
 
-            long totalClick = baseline.Clickthrough + stats.Clickthrough;
+            long totalClick = Math.Max(baseline.Clickthrough, persisted.Clickthrough);
             return totalClick / (double)totalDsp;
         }
 
@@ -417,12 +430,22 @@ namespace MainClient.Scheduler
             await EnsureTaskBaselineAsync(key, taskCtr).ConfigureAwait(false);
             var baseline = _taskGlobalBaseline[key];
             var rate = _taskClickRates.TryGetValue(key, out var r) ? r : taskCtr;
-            var gate = _clickRatioPlannerLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+            var persisted = _persistentMetrics.GetHour(key.HourKey, taskId);
+
+            // All processIndex/UV producers in this MainClient share this singleton
+            // service and therefore the same planner for a task/hour. PlanNext is
+            // atomic, so concurrent calls reserve distinct global stream positions.
+            var gate = _clickRatioPlannerLocks.GetOrAdd(
+                key,
+                _ => new SemaphoreSlim(1, 1));
 
             await gate.WaitAsync().ConfigureAwait(false);
             try
             {
-                var planner = GetOrCreateClickPlanner(key, baseline);
+                var planner = GetOrCreateClickPlanner(
+                    key,
+                    Math.Max(baseline.DSP, persisted.Dsp),
+                    Math.Max(baseline.Clickthrough, persisted.Clickthrough));
                 return planner.PlanNext(rate);
             }
             finally
@@ -581,6 +604,20 @@ namespace MainClient.Scheduler
 
             if (flushTasks.Count > 0)
                 await Task.WhenAll(flushTasks).ConfigureAwait(false);
+
+            SavePersistentMetrics();
+        }
+
+        private void SavePersistentMetrics()
+        {
+            try
+            {
+                _persistentMetrics.Save();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Persist traffic metrics failed.");
+            }
         }
 
         private async Task FlushTaskStateAsync(
@@ -965,6 +1002,7 @@ namespace MainClient.Scheduler
             }
             finally
             {
+                SavePersistentMetrics();
                 Volatile.Write(ref _state, 4);
 
                 _flushSemaphore.Dispose();

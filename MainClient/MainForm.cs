@@ -311,12 +311,17 @@ namespace MainClient
             try
             {
                 var host = _aggregator.GetHostSnapshot();
+                var today = _aggregator.GetTodayHostSnapshot();
                 var taskSnapshot = _taskManager.Snapshot;
                 label_request.Text = $"请求数量:{host.Request}";
                 label_start.Text = $"提交数量:{host.Start}";
                 label_dsp.Text = $"曝光数量:{host.Dsp}";
                 label_click.Text = $"点击数量:{host.Clickthrough} ({host.ClickRatio:P2})";
                 label_time.Text = $"运行时间:{FormatElapsed(taskSnapshot.RunElapsed)}";
+                toolStripStatusLabel3.Text = $"请求总量:{today.Request}";
+                toolStripStatusLabel4.Text = $"提交总量:{today.Start}";
+                toolStripStatusLabel5.Text = $"曝光总量:{today.Dsp}";
+                toolStripStatusLabel6.Text = $"点击总量:{today.Clickthrough}";
             }
             catch (Exception ex)
             {
