@@ -311,12 +311,17 @@ namespace MainClient
             try
             {
                 var host = _aggregator.GetHostSnapshot();
+                var today = _aggregator.GetTodayHostSnapshot();
                 var taskSnapshot = _taskManager.Snapshot;
                 label_request.Text = $"请求数量:{host.Request}";
                 label_start.Text = $"提交数量:{host.Start}";
                 label_dsp.Text = $"曝光数量:{host.Dsp}";
                 label_click.Text = $"点击数量:{host.Clickthrough} ({host.ClickRatio:P2})";
                 label_time.Text = $"运行时间:{FormatElapsed(taskSnapshot.RunElapsed)}";
+                toolStripStatusLabel3.Text = $"请求总量:{today.Request}";
+                toolStripStatusLabel4.Text = $"提交总量:{today.Start}";
+                toolStripStatusLabel5.Text = $"曝光总量:{today.Dsp}";
+                toolStripStatusLabel6.Text = $"点击总量:{today.Clickthrough}";
             }
             catch (Exception ex)
             {
@@ -1011,7 +1016,7 @@ namespace MainClient
             int TaskId,
             string Title,
             int TotalUv,
-            int ClickRate,
+            double ClickRate,
             string DeviceClientId,
             string Url,
             JToken AdParam,
@@ -1560,10 +1565,16 @@ namespace MainClient
                     .Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .FirstOrDefault() ?? string.Empty;
 
-                var clickRate = Math.Clamp(
-                    task.Value<int?>("click_rate") ?? 0,
-                    0,
-                    100);
+                // Keep the fractional part: parsing as int silently reduced the
+                // configurable CTR resolution to whole percentage points.
+                var rawClickRate = task.Value<double?>("click_rate") ?? 0d;
+                if (!double.IsFinite(rawClickRate))
+                {
+                    error = "click_rate 必须是有限数值";
+                    return false;
+                }
+
+                var clickRate = Math.Clamp(rawClickRate, 0d, 100d);
 
                 parsed = new ParsedTask(
                     taskId.Value,
