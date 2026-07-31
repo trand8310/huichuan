@@ -575,7 +575,7 @@ namespace MainClient.Common
                 System.IO.File.Delete(shortcutPath);
             }
             IWshRuntimeLibrary.IWshShortcut shortcut = wsh.CreateShortcut(shortcutPath) as IWshRuntimeLibrary.IWshShortcut;
-            shortcut.Arguments = "restart";
+            shortcut.Arguments = "--auto-start";
             shortcut.TargetPath = System.Windows.Forms.Application.ExecutablePath;
             shortcut.WindowStyle = 1;
             shortcut.Description = shortcutName;

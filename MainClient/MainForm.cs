@@ -510,8 +510,8 @@ namespace MainClient
         }
         #endregion
 
- 
- 
+
+
 
 
 
@@ -792,78 +792,77 @@ namespace MainClient
                 }
             }
         }
-        private async void MainForm_Load(object sender, EventArgs e)
+        private void MainForm_Load(object sender, EventArgs e)
         {
             this.MainFormHandle = (int)this.Handle;
             StartLogConsumer();
             _logger.LogInformation("应用已启动");
             ScheduleAutomaticRestart();
+            _ = Task.Run(async () =>
+             {
+                 if (_launchOptions.AutoStartTasks)
+                 {
+                     try
+                     {
+                         await _taskManager.StartAsync();
+                         _logger.LogInformation("应用由定时重启启动，任务调度已自动开始");
+                     }
+                     catch (Exception ex)
+                     {
+                         _logger.LogError(ex, "定时重启后自动开始任务调度失败");
+                     }
+                 }
 
-            if (_launchOptions.AutoStartTasks)
-            {
-                try
-                {
-                    await _taskManager.StartAsync();
-                    _logger.LogInformation("应用由定时重启启动，任务调度已自动开始");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "定时重启后自动开始任务调度失败");
-                }
-            }
+                 this.InvokeOnUiThreadIfRequired(() =>
+                 {
 
-            Task.Run(() =>
-            {
-                this.InvokeOnUiThreadIfRequired(() =>
-                {
+                     #region 控件初始化
+                     var controls = new List<Control>() { groupBox2 };
+                     foreach (var control in controls)
+                     {
+                         foreach (var c in control.Controls)
+                         {
+                             if (c is NumericUpDown)
+                             {
+                                 (c as NumericUpDown).ValueChanged += (s, e) =>
+                                 {
+                                     UpdateAppSetting();
+                                 };
+                             }
+                             else if (c is TextBox)
+                             {
+                                 (c as TextBox).TextChanged += (s, e) =>
+                                 {
+                                     UpdateAppSetting();
+                                 };
+                             }
+                             else if (c is CheckBox)
+                             {
+                                 (c as CheckBox).Click += (s, e) =>
+                                 {
+                                     UpdateAppSetting();
+                                 };
+                             }
+                             else if (c is RadioButton)
+                             {
+                                 (c as RadioButton).Click += (s, e) =>
+                                 {
+                                     UpdateAppSetting();
+                                 };
+                             }
+                             else if (c is ComboBox)
+                             {
+                                 (c as ComboBox).SelectedIndexChanged += (s, e) =>
+                                 {
+                                     UpdateAppSetting();
+                                 };
+                             }
+                         }
+                     }
+                     #endregion
 
-                    #region 控件初始化
-                    var controls = new List<Control>() { groupBox2 };
-                    foreach (var control in controls)
-                    {
-                        foreach (var c in control.Controls)
-                        {
-                            if (c is NumericUpDown)
-                            {
-                                (c as NumericUpDown).ValueChanged += (s, e) =>
-                                {
-                                    UpdateAppSetting();
-                                };
-                            }
-                            else if (c is TextBox)
-                            {
-                                (c as TextBox).TextChanged += (s, e) =>
-                                {
-                                    UpdateAppSetting();
-                                };
-                            }
-                            else if (c is CheckBox)
-                            {
-                                (c as CheckBox).Click += (s, e) =>
-                                {
-                                    UpdateAppSetting();
-                                };
-                            }
-                            else if (c is RadioButton)
-                            {
-                                (c as RadioButton).Click += (s, e) =>
-                                {
-                                    UpdateAppSetting();
-                                };
-                            }
-                            else if (c is ComboBox)
-                            {
-                                (c as ComboBox).SelectedIndexChanged += (s, e) =>
-                                {
-                                    UpdateAppSetting();
-                                };
-                            }
-                        }
-                    }
-                    #endregion
-
-                });
-            });
+                 });
+             });
 
         }
 
@@ -1443,7 +1442,7 @@ namespace MainClient
                         network.ProxyServer,
                         network.IpInfo,
                         _appSettings.IsProxyMode);
-                   // adx = JObject.Parse(Resources.adx_json);
+                    // adx = JObject.Parse(Resources.adx_json);
 
 
                 }
