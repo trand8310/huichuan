@@ -5,7 +5,7 @@ VisualStudioVersion = 17.0.32014.148
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "MainClient", "MainClient\MainClient.csproj", "{FFE8A437-251E-45EE-AE34-D05AD13CF8E9}"
 EndProject
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CefClient", "CEFClient\CefClient.csproj", "{61990194-81C0-4E3C-8C14-66B74848CE34}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CefClient", "CefClient\CefClient.csproj", "{61990194-81C0-4E3C-8C14-66B74848CE34}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
