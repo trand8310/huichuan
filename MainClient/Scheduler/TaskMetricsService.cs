@@ -419,13 +419,6 @@ namespace MainClient.Scheduler
             var rate = _taskClickRates.TryGetValue(key, out var r) ? r : taskCtr;
             var gate = _clickRatioPlannerLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
 
-            // All processIndex/UV producers in this MainClient share this singleton
-            // service and therefore the same planner for a task/hour. PlanNext is
-            // atomic, so concurrent calls reserve distinct global stream positions.
-            var gate = _clickRatioPlannerLocks.GetOrAdd(
-                key,
-                _ => new SemaphoreSlim(1, 1));
-
             await gate.WaitAsync().ConfigureAwait(false);
             try
             {
