@@ -1,60 +1,84 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
-  <PropertyGroup>
-    <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
-    <Nullable>enable</Nullable>
-    <UseWindowsForms>true</UseWindowsForms>
-    <ImplicitUsings>enable</ImplicitUsings>
-	<InvariantGlobalization>false</InvariantGlobalization>
-    <RootNamespace>MainClient</RootNamespace>
-    <Platforms>AnyCPU;x86;x64</Platforms>
-	<OutputPath>..\Build</OutputPath>
-	<PlatformTarget>x64</PlatformTarget>
-	<AppendTargetFrameworkToOutputPath>output</AppendTargetFrameworkToOutputPath>
-  </PropertyGroup>
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<Nullable>enable</Nullable>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<InvariantGlobalization>false</InvariantGlobalization>
+		<RootNamespace>MainClient</RootNamespace>
+		<Platforms>AnyCPU;x86;x64</Platforms>
+		<OutputPath>..\Build</OutputPath>
+		<PlatformTarget>x64</PlatformTarget>
+		<AppendTargetFrameworkToOutputPath>output</AppendTargetFrameworkToOutputPath>
+	</PropertyGroup>
 
-  <PropertyGroup Condition="'$(PlatformTarget)' == 'x86'">
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''"></RuntimeIdentifier>
-    <SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>
-  </PropertyGroup>
+	<PropertyGroup Condition="'$(PlatformTarget)' == 'x86'">
+		<RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''"></RuntimeIdentifier>
+		<SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>
+	</PropertyGroup>
 
-  <PropertyGroup Condition="'$(PlatformTarget)' == 'x64'">
-    <RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''"></RuntimeIdentifier>
-    <SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>
-  </PropertyGroup>
+	<PropertyGroup Condition="'$(PlatformTarget)' == 'x64'">
+		<RuntimeIdentifier Condition="'$(RuntimeIdentifier)' == ''"></RuntimeIdentifier>
+		<SelfContained Condition="'$(SelfContained)' == ''">false</SelfContained>
+	</PropertyGroup>
 
-  <ItemGroup>
-    <Compile Include="..\Shared\CefProtocol.cs" Link="Protocol\CefProtocol.cs" />
-    <Compile Include="..\Shared\CopyDataMessageQueue.cs" Link="Protocol\CopyDataMessageQueue.cs" />
-  </ItemGroup>
+	<ItemGroup>
+		<Compile Include="..\Shared\CefProtocol.cs" Link="Protocol\CefProtocol.cs" />
+		<Compile Include="..\Shared\CopyDataMessageQueue.cs" Link="Protocol\CopyDataMessageQueue.cs" />
+		<Compile Include="..\Shared\System\InvokeWinApi.cs" Link="Win32\InvokeWinApi.cs" />
 
-  <ItemGroup>
-    <COMReference Include="IWshRuntimeLibrary">
-      <WrapperTool>tlbimp</WrapperTool>
-      <VersionMinor>0</VersionMinor>
-      <VersionMajor>1</VersionMajor>
-      <Guid>f935dc20-1cf0-11d0-adb9-00c04fd58a0b</Guid>
-      <Lcid>0</Lcid>
-      <Isolated>false</Isolated>
-      <EmbedInteropTypes>true</EmbedInteropTypes>
-    </COMReference>
-  </ItemGroup>
-  
-  <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
-    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-    <PackageReference Include="Serilog.Enrichers.Thread" Version="4.0.0" />
-    <PackageReference Include="Serilog.Extensions.Hosting" Version="8.0.0" />
-    <PackageReference Include="Serilog.Sinks.File" Version="6.0.0" />
-    <PackageReference Include="System.Management" Version="8.0.0" />
-  </ItemGroup>
+	</ItemGroup>
 
-  <ItemGroup>
-    <None Update="appsettings.json">
-      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
-    </None>
-  </ItemGroup>
+	<ItemGroup>
+		<COMReference Include="IWshRuntimeLibrary">
+			<WrapperTool>tlbimp</WrapperTool>
+			<VersionMinor>0</VersionMinor>
+			<VersionMajor>1</VersionMajor>
+			<Guid>f935dc20-1cf0-11d0-adb9-00c04fd58a0b</Guid>
+			<Lcid>0</Lcid>
+			<Isolated>false</Isolated>
+			<EmbedInteropTypes>true</EmbedInteropTypes>
+		</COMReference>
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.0" />
+		<PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
+		<PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+		<PackageReference Include="System.Management" Version="8.0.0" />
+
+
+		<PackageReference Include="Serilog" Version="4.3.1" />
+		<PackageReference Include="Serilog.Enrichers.Environment" Version="3.0.1" />
+		<PackageReference Include="Serilog.Enrichers.Process" Version="3.0.0" />
+		<PackageReference Include="Serilog.Enrichers.Thread" Version="4.0.0" />
+		<PackageReference Include="Serilog.Extensions.Logging" Version="10.0.0" />
+		<PackageReference Include="Serilog.Settings.Configuration" Version="10.0.0" />
+		<PackageReference Include="Serilog.Extensions.Hosting" Version="10.0.0" />
+		<PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <Compile Update="Properties\Resources.Designer.cs">
+	    <DesignTime>True</DesignTime>
+	    <AutoGen>True</AutoGen>
+	    <DependentUpon>Resources.resx</DependentUpon>
+	  </Compile>
+	</ItemGroup>
+
+	<ItemGroup>
+	  <EmbeddedResource Update="Properties\Resources.resx">
+	    <Generator>ResXFileCodeGenerator</Generator>
+	    <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+	  </EmbeddedResource>
+	</ItemGroup>
+
+	<ItemGroup>
+		<None Update="appsettings.json">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+		</None>
+	</ItemGroup>
 
 </Project>

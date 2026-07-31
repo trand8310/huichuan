@@ -1,4 +1,6 @@
-﻿using MainClient.Properties;
+﻿using MainClient.Infrastructure;
+using MainClient.Models;
+using MainClient.Properties;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
@@ -44,11 +46,11 @@ namespace MainClient.Common
 
 
         private readonly ILogger _logger;
-        private readonly IWritableOptions<AppSettings> _appSettings;
+        private readonly AppSettings _appSettings;
         private readonly IHttpClientFactory _httpClientFactory;
         public static SemaphoreSlim _mutex = new SemaphoreSlim(1);
 
-        public DevHelper(IWritableOptions<AppSettings> appSettings, IHttpClientFactory httpClientFactory, ILogger<DevHelper> logger)
+        public DevHelper(AppSettings appSettings, IHttpClientFactory httpClientFactory, ILogger<DevHelper> logger)
         {
             _appSettings = appSettings;
             _httpClientFactory = httpClientFactory;
@@ -104,7 +106,7 @@ namespace MainClient.Common
         {
             try
             {
-                var devApiUrl = _appSettings.Value.DevApiUrl;
+                var devApiUrl = _appSettings.DevApiUrl;
                 var client = _httpClientFactory.CreateClient();
                 client.DefaultRequestHeaders.Clear();
                 client.DefaultRequestHeaders.TryAddWithoutValidation("Content-Type", "application/json; charset=utf-8");
@@ -220,78 +222,5 @@ namespace MainClient.Common
         }
         #endregion
 
-        /// <summary>
-        /// 获取设备信息
-        /// </summary>
-        /// <param name="os"></param>
-        /// <returns></returns>
-        public JObject GetRandomDevByOS(OSType os)
-        {
-            if (os == OSType.IOS)
-            {
-                var jo = new JObject();
-                jo.Add("idfa", DevMan.GetIdfa());
-                jo.Add("imei", DevMan.GetImei());
-                jo.Add("mac", CommonHelper.GetRandomMacAddress());
-                return jo;
-            }
-            else if (os == OSType.ANDROID)
-            {
-
-                var jo = new JObject();
-                jo.Add("android_id", DevMan.GetAndroidId());
-                jo.Add("imei", DevMan.GetImei().ToLower());
-                jo.Add("mac", CommonHelper.GetRandomMacAddress().ToUpper());
-                return jo;
-            }
-            return null;
-        }
-
-        public string GetDevScreen(string ua)
-        {
-            var result = string.Empty;
-            if (ua.Contains("iPad;"))
-            {
-                result = ipad_screens[new Random().Next(0, ipad_screens.Length - 1)];
-            }
-            else if (ua.Contains("iPhone;"))
-            {
-                if (ua.Contains("iPhone OS 7"))
-                {
-                    result = iphone_screens[new Random().Next(0, 1)];
-                }
-                else if (ua.Contains("iPhone OS 8"))
-                {
-                    result = iphone_screens[new Random().Next(1, 3)];
-                }
-                else if (ua.Contains("iPhone OS 9"))
-                {
-                    result = iphone_screens[new Random().Next(1, 3)];
-                }
-                else if (ua.Contains("iPhone OS 10"))
-                {
-                    result = iphone_screens[new Random().Next(3, 6)];
-                }
-                else if (ua.Contains("iPhone OS 11"))
-                {
-                    result = iphone_screens[new Random().Next(3, 6)];
-                }
-                else if (ua.Contains("iPhone OS 12"))
-                {
-                    result = iphone_screens[new Random().Next(3, 6)];
-                }
-                else
-                    result = iphone_screens[new Random().Next(3, 6)];
-            }
-            else if (ua.Contains("Android;"))
-            {
-                result = android_screens[new Random().Next(0, android_screens.Length - 1)];
-            }
-            else
-            {
-                result = desktop_screens[new Random().Next(0, desktop_screens.Length - 1)];
-            }
-            return result;
-        }
     }
 }

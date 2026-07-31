@@ -1,8 +1,15 @@
-﻿using MainClient.Common;
+﻿using Huichuan.Protocol;
+using MainClient.Common;
+using MainClient.Infrastructure;
+using MainClient.Logging;
+using MainClient.LogViewer;
 using MainClient.Models;
+using MainClient.Properties;
+using MainClient.Scheduler;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Serilog.Events;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
@@ -12,93 +19,641 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading.Channels;
 using System.Win32;
-using Huichuan.Protocol;
 
 namespace MainClient
 {
     public partial class MainForm : Form
     {
-        private readonly ILogger _logger;
-        private readonly IWritableOptions<AppSettings> _appSettings;
-        private readonly DevHelper _devHelper = null;
-        private readonly AdxHelper _adxHelper = null;
-        private readonly IpHelper _ipHelper = null;
-        private readonly ProxyTester _ipTester;
-        private int mainWnd = 0;
+        private int MainFormHandle = 0;
         private CancellationTokenSource? cts;
-        private readonly SemaphoreSlim runStateGate = new(1, 1);
-        private Task? runTask;
-        private SynchronizationContext sync;
-        /// <summary>
-        /// 标记应用程序是否重启
-        /// </summary>
-        private bool isRestart = false;
-        private bool isRunning = false;
-        private Stopwatch sw = new Stopwatch();
+
+        private readonly ILogger _logger;
+        private readonly AppSettings _appSettings;
+        private readonly DevHelper _devHelper;
+        private readonly AdxHelper _adxHelper;
+        private readonly IpHelper _ipHelper;
+        private readonly ProxyTester _ipTester;
         private readonly CopyDataMessageQueue messageQueue;
-        private readonly LocalTaskStatistics statistics;
+        private readonly TaskMetricsService _aggregator;
 
-        #region  LogWrite
 
-        private ConcurrentQueue<string> logBuffer = new ConcurrentQueue<string>();
-        private bool isProcessingLogs = false;
-        private const int MaxBatchSize = 50;
-        private void ProcessLogs()
+
+        #region 任务调度管理
+
+        private TaskDispatchManager _taskManager = default!;
+        private void InitTaskDispatchManager()
         {
-            isProcessingLogs = true;
-            Task.Run(async () =>
+            _taskManager = new TaskDispatchManager(new TaskDispatchManagerOptions
             {
-                var logsToProcess = new StringBuilder();
-                while (isProcessingLogs)
+                // 队列容量,表示最多提前缓存 指定数量 任务
+                Capacity = _appSettings.MaxConcurrency,
+
+                // 停止时，把队列里还没被取出的任务落盘
+                PersistPendingOnStop = true,
+
+                // 下次启动时，先加载上次落盘的任务
+                LoadPersistedOnStart = false,
+
+                // 加载成功后删除落盘文件，避免重复执行
+                DeletePersistenceFileAfterLoad = true,
+
+                PersistenceFilePath = Path.Combine(
+                    AppContext.BaseDirectory,
+                    "pending_tasks.json"),
+
+                // 单个任务失败，不影响整体继续跑
+                ContinueOnTaskError = true,
+
+                // 停止最多等待 8 秒
+                DefaultStopTimeout = TimeSpan.FromSeconds(8),
+
+                ScheduledTasks = new List<ScheduledTaskOptions>()
                 {
-                    bool logsProcessed = false;
-                    int logCount = 0;
-                    while (logCount < MaxBatchSize && logBuffer.TryDequeue(out string logMessage))
-                    {
-                        logsToProcess.Append(logMessage);
-                        logsProcessed = true;
+                    new ScheduledTaskOptions(){
+                        Name="定时更新UI",
+                        Interval = TimeSpan.FromSeconds(1),
+                      // 初始化 Callback
+                        Callback = async (cancellationToken) =>
+                        {
+                            try
+                            {
+                              //LogWriteLine($"定时触发: {DateTime.Now}");
+
+                              await this.UiInvokeAsync(() =>{
+                                  RefreshTrafficStatsToUi();
+                              });
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                Console.WriteLine("任务被取消");
+                            }
+                        },
+                        ContinueOnError = true
                     }
-                    if (logsProcessed)
+                }
+            });
+
+            _taskManager.ConfigureStart(new TaskDispatchStartOptions
+            {
+                // TrafficTaskStateKind者数量
+                ConsumerCount = _appSettings.MaxConcurrency,
+                // 生产者方法
+                Producer = ProducerAsync,
+                // 消费者方法
+                Consumer = ConsumerAsync
+            });
+            _taskManager.StateChanged += TaskManager_StateChanged;
+            _taskManager.LogEmitted += TaskManager_LogEmitted;
+            _taskManager.TaskEnqueued += TaskManager_TaskEnqueued;
+            _taskManager.TaskDequeued += TaskManager_TaskDequeued;
+            _taskManager.TaskStarted += TaskManager_TaskStarted;
+            _taskManager.TaskSucceeded += TaskManager_TaskSucceeded;
+            _taskManager.TaskFailed += TaskManager_TaskFailed;
+            _taskManager.TaskCanceled += TaskManager_TaskCanceled;
+            _taskManager.TaskDropped += TaskManager_TaskDropped;
+            _taskManager.PendingTasksPersisted += TaskManager_PendingTasksPersisted;
+            _taskManager.PersistedTasksLoaded += TaskManager_PersistedTasksLoaded;
+            _taskManager.StatisticsChanged += TaskManager_StatisticsChanged;
+
+            RefreshStartStopButton(_taskManager.State);
+
+            this.FormClosing += async (s, e) =>
+            {
+                if (_taskManager == null)
+                    return;
+                if (_taskManager.State == RunnerState.Running ||
+                    _taskManager.State == RunnerState.Stopping)
+                {
+                    e.Cancel = true;
+
+                    btnStartStop.Enabled = false;
+                    btnStartStop.Text = "停止中...";
+
+                    try
                     {
-                        WriteToLogs(logsToProcess.ToString());
-                        logsToProcess.Clear();
+                        await _taskManager.StopAsync(new TaskDispatchStopOptions
+                        {
+                            Timeout = TimeSpan.FromSeconds(8),
+                            PersistPending = true
+                        });
                     }
-                    await Task.Delay(1000);
+                    catch
+                    {
+                    }
+
+                    e.Cancel = false;
+                    Close();
                 }
 
+            };
+        }
+
+        #region 状态变化事件：更新按钮文本
+        private void TaskManager_StateChanged(
+        object? sender,
+        RunnerStateChangedEventArgs e)
+        {
+            BeginInvokeSafe(() =>
+            {
+                RefreshStartStopButton(e.NewState);
             });
         }
-        private void WriteToLogs(string logMessage)
+        private void RefreshStartStopButton(RunnerState state)
         {
-            if (LogTextBox.InvokeRequired)
+            switch (state)
             {
-                LogTextBox.Invoke((MethodInvoker)(() => { WriteToLogs(logMessage); }));
-                return;
+                case RunnerState.Stopped:
+                    btnStartStop.Enabled = true;
+                    btnStartStop.Text = "开始";
+                    break;
+
+                case RunnerState.Running:
+                    btnStartStop.Enabled = true;
+                    btnStartStop.Text = "停止";
+                    break;
+
+                case RunnerState.Stopping:
+                    btnStartStop.Enabled = false;
+                    btnStartStop.Text = "停止中...";
+                    break;
+
+                case RunnerState.Faulted:
+                    btnStartStop.Enabled = true;
+                    btnStartStop.Text = "重新开始";
+                    break;
             }
-            LogTextBox.AppendText(logMessage);
-            LogTextBox.ScrollToCaret();
         }
-        public void LogWriteLine(string logMessage)
-        {
-            logBuffer.Enqueue(($"{System.DateTime.Now.ToString("[HH:mm:ss]")} {logMessage}{System.Environment.NewLine}"));
-        }
-
-        public void LogDetailInfo(string message)
-        {
-            if (IsDisposed || Disposing || !IsHandleCreated)
-                return;
-            if (InvokeRequired)
-            {
-                Invoke((MethodInvoker)(() => { LogDetailInfo(message); }));
-                return;
-            }
-            LogDetailTextBox.AppendText($"{System.DateTime.Now.ToString("[HH:mm:ss]")} {message}{Environment.NewLine}");
-            LogDetailTextBox.ScrollToCaret();
-        }
-
-
 
         #endregion
+
+        #region 日志事件
+        private void TaskManager_LogEmitted(
+        object? sender,
+        DispatchLogEventArgs e)
+        {
+            //this.InvokeOnUiThreadIfRequired(() =>
+            //{
+            //    AddLog(e.ToString());
+
+            //    if (e.Exception != null)
+            //    {
+            //        AddLog(e.Exception.ToString());
+            //    }
+            //});
+        }
+        #endregion
+
+        #region 任务事件
+        private void TaskManager_TaskEnqueued(
+        object? sender,
+        DispatchTaskEventArgs e)
+        {
+            //this.InvokeOnUiThreadIfRequired(() =>
+            //{
+            //    AddLog($"任务入队: {e.TaskId}");
+            //});
+        }
+
+        private void TaskManager_TaskDequeued(
+            object? sender,
+            DispatchTaskEventArgs e)
+        {
+            //this.InvokeOnUiThreadIfRequired(() =>
+            //{
+            //    AddLog($"任务出队: Consumer={e.ConsumerId}, TaskId={e.TaskId}");
+            //});
+        }
+
+        private void TaskManager_TaskStarted(
+            object? sender,
+            DispatchTaskEventArgs e)
+        {
+            //this.InvokeOnUiThreadIfRequired(() =>
+            //{
+            //    AddLog($"任务开始: Consumer={e.ConsumerId}, TaskId={e.TaskId}");
+            //});
+        }
+
+        private void TaskManager_TaskSucceeded(
+            object? sender,
+            DispatchTaskEventArgs e)
+        {
+            //this.InvokeOnUiThreadIfRequired(() =>
+            //{
+            //    AddLog($"任务成功: Consumer={e.ConsumerId}, TaskId={e.TaskId}, 耗时={e.Elapsed?.TotalMilliseconds:0}ms");
+            //});
+        }
+
+        private void TaskManager_TaskFailed(
+            object? sender,
+            DispatchTaskEventArgs e)
+        {
+            //this.InvokeOnUiThreadIfRequired(() =>
+            //{
+            //    AddLog($"任务失败: Consumer={e.ConsumerId}, TaskId={e.TaskId}, Error={e.Exception?.Message}");
+            //});
+        }
+
+        private void TaskManager_TaskCanceled(
+            object? sender,
+            DispatchTaskEventArgs e)
+        {
+            //this.InvokeOnUiThreadIfRequired(() =>
+            //{
+            //    AddLog($"任务取消: Consumer={e.ConsumerId}, TaskId={e.TaskId}");
+            //});
+        }
+
+        private void TaskManager_TaskDropped(
+            object? sender,
+            DispatchTaskEventArgs e)
+        {
+            //BeginInvokeSafe(() =>
+            //{
+            //    AddLog($"任务丢弃/待落盘: TaskId={e.TaskId}");
+            //});
+        }
+        #endregion
+
+        #region 任务队列的落盘/恢复
+        private void TaskManager_PendingTasksPersisted(
+        object? sender,
+        PendingTasksPersistedEventArgs e)
+        {
+            BeginInvokeSafe(() =>
+            {
+                AddLog($"剩余任务已落盘: Count={e.Count}, File={e.FilePath}");
+            });
+        }
+
+        private void TaskManager_PersistedTasksLoaded(
+            object? sender,
+            PersistedTasksLoadedEventArgs e)
+        {
+            BeginInvokeSafe(() =>
+            {
+                AddLog($"落盘任务已恢复: Count={e.Count}, File={e.FilePath}");
+            });
+        }
+        #endregion
+
+        #region 任务执行状态统计
+        private void TaskManager_StatisticsChanged(
+        object? sender,
+        TaskDispatchSnapshot snapshot)
+        {
+            // 当前界面统计由 _statsTimer 周期性拉取 TrafficAggregator 快照统一刷新，
+            // 避免高频事件直接更新 UI 造成界面抖动或跨线程访问。
+        }
+
+        /// <summary>
+        /// 更新UI上的统计数据
+        /// </summary>
+        private void RefreshTrafficStatsToUi()
+        {
+            try
+            {
+                var host = _aggregator.GetHostSnapshot();
+                var taskSnapshot = _taskManager.Snapshot;
+                label_request.Text = $"请求数量:{host.Request}";
+                label_start.Text = $"提交数量:{host.Start}";
+                label_dsp.Text = $"曝光数量:{host.Dsp}";
+                label_click.Text = $"点击数量:{host.Clickthrough} ({host.ClickRatio:P2})";
+                label_time.Text = $"运行时间:{FormatElapsed(taskSnapshot.RunElapsed)}";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "RefreshTrafficStatsToUi failed.");
+            }
+        }
+
+        private static string FormatElapsed(TimeSpan elapsed)
+        {
+            if (elapsed.TotalHours >= 1)
+                return $"{(int)elapsed.TotalHours:00}:{elapsed.Minutes:00}:{elapsed.Seconds:00}";
+
+            return elapsed.ToString(@"mm\:ss");
+        }
+        #endregion
+
+        #region 生产任务
+        private async Task ProducerAsync(
+        ChannelWriter<JToken> writer,
+        CancellationToken token)
+        {
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    List<JToken> taskOfList;
+
+                    try
+                    {
+                        taskOfList = await _adxHelper.GetTasksAsync(token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        LogWriteLine($"拉取任务异常: {ex}");
+
+                        await Task.Delay(_appSettings.TaskPullIntervalMs, token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (taskOfList.Count == 0)
+                    {
+                        int interval = _appSettings.TaskPullIntervalMs <= 0
+                            ? 500
+                            : _appSettings.TaskPullIntervalMs;
+
+                        await Task.Delay(interval, token).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    int multiple = _appSettings.Multiple <= 0
+                        ? 1
+                        : _appSettings.Multiple;
+
+                    int writeCount = 0;
+
+                    int fetchCount = taskOfList.Count();
+
+                    foreach (var task in taskOfList)
+                    {
+                        token.ThrowIfCancellationRequested();
+
+                        for (int i = 0; i < multiple; i++)
+                        {
+                            token.ThrowIfCancellationRequested();
+
+                            var cloned = task.DeepClone();
+
+                            if (cloned is JObject obj)
+                            {
+                                //obj["_copyIndex"] = i + 1;
+                                //obj["_copyTotal"] = multiple;
+                                //obj["_dispatchTime"] = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                            }
+
+                            // 重点：
+                            // 正常运行时，如果 Channel 满了，这里会等待。
+                            // 点击停止时，token 取消，这里会立即退出。
+                            await writer.WriteAsync(cloned, token).ConfigureAwait(false);
+
+                            writeCount++;
+                        }
+                    }
+
+                    LogWriteLine($"本轮取回={fetchCount}，倍率={multiple}，写入队列={writeCount}");
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                LogWriteLine("Producer 已取消。");
+            }
+            catch (ChannelClosedException)
+            {
+                LogWriteLine("Producer 检测到 Channel 已关闭。");
+            }
+            catch (Exception ex)
+            {
+                LogWriteLine($"Producer 主循环异常: {ex}");
+            }
+            finally
+            {
+                writer.TryComplete();
+            }
+        }
+
+        #endregion
+
+        #region 执行任务
+
+
+        /// <summary>
+        /// 安全消费 Channel 中的任务。
+        /// 主要职责仅保留：读取任务、确保子进程存在、处理任务、回收子进程。
+        /// </summary>
+        public async Task ConsumerAsync(
+        int consumerId,
+        JToken task,
+        CancellationToken token)
+        {
+            ClientRuntime? runtime = null;
+            var processLifetime = GetProcessLifetime();
+            try
+            {
+                runtime = await EnsureClientRuntimeAsync(
+                    runtime,
+                    consumerId,
+                    token);
+
+                if (runtime is null)
+                {
+                    LogWriteLine($"消费者[{consumerId}]无法启动 CefClient，跳过任务。");
+                    return;
+                }
+
+                await ProcessOneTaskAsync(
+                    task,
+                    runtime,
+                    consumerId,
+                    processLifetime,
+                    token);
+
+                if (HasExceededLifetime(runtime, processLifetime))
+                {
+                    await StopClientRuntimeAsync(
+                        runtime,
+                        $"运行时间超过 {processLifetime}");
+
+                    runtime = null;
+                }
+                else if (!IsProcessAlive(runtime.Process))
+                {
+                    await StopClientRuntimeAsync(runtime, "子进程已经退出");
+                    runtime = null;
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+
+            }
+            catch (Exception ex)
+            {
+                // 不要只记录 ex.Message，否则会丢失堆栈和内部异常。
+                LogWriteLine($"消费者[{consumerId}]处理任务异常：{ex}");
+
+                if (runtime is not null && !IsProcessAlive(runtime.Process))
+                {
+                    await StopClientRuntimeAsync(runtime, "异常后发现子进程不可用");
+                    runtime = null;
+                }
+            }
+            finally
+            {
+                if (runtime is not null)
+                {
+                    await StopClientRuntimeAsync(runtime, "消费者退出");
+                }
+            }
+            return;
+
+        }
+        #endregion
+
+        private void AddLog(string message)
+        {
+            //if (IsDisposed)
+            //    return;
+
+            //var line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}";
+
+            //if (LogTextBox.IsDisposed)
+            //    return;
+
+            //LogTextBox.AppendText(line);
+            // _logger.LogInformation(message);
+            LogWriteLine(message);
+        }
+
+        private void BeginInvokeSafe(Action action)
+        {
+            if (IsDisposed)
+                return;
+
+            if (InvokeRequired)
+            {
+                try
+                {
+                    BeginInvoke(action);
+                }
+                catch
+                {
+                }
+            }
+            else
+            {
+                action();
+            }
+        }
+        #endregion
+
+
+
+
+
+
+        #region LogWrite
+
+        private readonly ConcurrentQueue<UiLogItem> _uiLogBuffer = new();
+        private readonly System.Windows.Forms.Timer _uiTimer = new();
+        private CancellationTokenSource _uiLogCts = new();
+        private int _flushing = 0;
+        private const int MaxFlushCount = 500;
+        // 新控件
+        private LogViewerUltra logViewer;
+        private void StartLogConsumer()
+        {
+            // 初始化新控件
+            logViewer = new LogViewerUltra()
+            {
+                Dock = DockStyle.Fill
+            };
+            groupBox4.Controls.Add(logViewer);
+
+            // 后台读取日志
+            Task.Run(async () =>
+            {
+                var reader = UiLogChannel.Channel.Reader;
+
+                try
+                {
+                    await foreach (var item in reader.ReadAllAsync(_uiLogCts.Token))
+                    {
+                        if (_uiLogCts.IsCancellationRequested)
+                            break;
+
+                        _uiLogBuffer.Enqueue(item);
+                    }
+                }
+                catch (OperationCanceledException) { }
+
+            }, _uiLogCts.Token);
+
+            // UI Timer
+            _uiTimer.Interval = 200;
+            _uiTimer.Tick += (_, __) =>
+            {
+                if (Interlocked.Exchange(ref _flushing, 1) == 1)
+                    return;
+
+                try
+                {
+                    FlushLogsToUi();
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _flushing, 0);
+                }
+            };
+            _uiTimer.Start();
+
+            this.FormClosing += (s, e) =>
+            {
+                try
+                {
+                    _uiTimer.Stop();
+                    _uiLogCts.Cancel();
+                    UiLogChannel.Channel.Writer.TryComplete();
+                }
+                catch { }
+            };
+        }
+        private void FlushLogsToUi()
+        {
+            if (IsDisposed || Disposing)
+                return;
+
+            if (!IsHandleCreated || logViewer.IsDisposed)
+                return;
+
+            if (_uiLogBuffer.IsEmpty)
+                return;
+
+            int count = 0;
+
+            while (_uiLogBuffer.TryDequeue(out var item))
+            {
+                logViewer.WriteLog(item.Message, ConvertLevel(item.Level));
+
+                if (++count >= MaxFlushCount)
+                    break;
+            }
+        }
+        // 日志级别映射
+        private LogLevel ConvertLevel(LogEventLevel level) => level switch
+        {
+            LogEventLevel.Verbose => LogLevel.Trace,
+            LogEventLevel.Debug => LogLevel.Debug,
+            LogEventLevel.Information => LogLevel.Information,
+            LogEventLevel.Warning => LogLevel.Warning,
+            LogEventLevel.Error => LogLevel.Error,
+            _ => LogLevel.Information
+        };
+
+        public void LogWriteLine(string message)
+        {
+            _logger.LogInformation(message);
+        }
+
+        #endregion
+
+
+
 
         #region 消息解析
         private void ResolveMessage(string value)
@@ -138,20 +693,18 @@ namespace MainClient
                 var taskId = message.SelectToken("Data.TaskId").Value<int>();
                 if (message.SelectToken("Data.Type").Value<int>() == 2)
                 {
-                    _adxHelper.UpdateTaskDspClick(taskId, 1);
-                    statistics.Increment(TaskStatisticNames.Clicks);
+                    _aggregator.EnqueueTaskState(new TrafficTaskStateEvent(taskId, TrafficTaskStateKind.Clickthrough, 1));
                 }
                 else
                 {
-                    _adxHelper.UpdateTaskDsp(taskId, 1);
-                    statistics.Increment(TaskStatisticNames.Exposures);
+                    _aggregator.EnqueueTaskState(new TrafficTaskStateEvent(taskId, TrafficTaskStateKind.DSP, 1));
                 }
             }
             else if (msgName.Equals(CefProtocol.Messages.TaskLog, StringComparison.Ordinal))
             {
-                if (_appSettings.Value.IsDetailLog)
+                if (_appSettings.IsDetailLog)
                 {
-                    LogDetailInfo(message.SelectToken("Data.Message").Value<string>());
+                    LogWriteLine(message.SelectToken("Data.Message").Value<string>());
                 }
 
             }
@@ -166,9 +719,9 @@ namespace MainClient
             cds.lpData = message;
             cds.cbData = buffer.Length + 1;
             const uint abortIfHung = 0x0002;
-            var sent = NativeMethod.SendMessageTimeout(
+            var sent = Win32Api.SendMessageTimeout(
                 consumer.ClientWindowHandle,
-                NativeMethod.WM_COPYDATA,
+                Win32Api.WM_COPYDATA,
                 IntPtr.Zero,
                 ref cds,
                 abortIfHung,
@@ -181,7 +734,7 @@ namespace MainClient
 
         protected override void DefWndProc(ref System.Windows.Forms.Message m)
         {
-            if (m.Msg != NativeMethod.WM_COPYDATA)
+            if (m.Msg != Win32Api.WM_COPYDATA)
             {
                 base.DefWndProc(ref m);
                 return;
@@ -212,74 +765,36 @@ namespace MainClient
 
 
         public MainForm(
+            TaskMetricsService aggregator,
             DevHelper devHelper,
             AdxHelper adxHelper,
             IpHelper ipHelper,
             ProxyTester ipTester,
-            IWritableOptions<AppSettings> appSettings,
+            AppSettings appSettings,
             ILogger<MainForm> logger)
         {
-            this._devHelper = devHelper;
-            this._adxHelper = adxHelper;
-            this._ipHelper = ipHelper;
-            this._ipTester = ipTester;
-            this._appSettings = appSettings;
-            this._logger = logger;
+            _aggregator = aggregator;
+            _devHelper = devHelper;
+            _adxHelper = adxHelper;
+            _ipHelper = ipHelper;
+            _ipTester = ipTester;
+            _appSettings = appSettings;
+            _logger = logger;
+
             messageQueue = new CopyDataMessageQueue(
                 ResolveMessage,
                 exception => _logger.LogError(exception, "处理 WM_COPYDATA 失败"),
                 Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
-            statistics = new LocalTaskStatistics(
-                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs"),
-                _appSettings.Value.TaskName);
-            if (!statistics.TryLoad(out var statisticsLoadError))
-                _logger.LogWarning(statisticsLoadError, "加载本机任务统计失败，将从零继续累计");
+
+
             InitializeComponent();
             FormClosing += MainForm_FormClosing;
-            this.Text += $"{AppConsts.AppVertion}";
-            this.sync = SynchronizationContext.Current;
+            this.Text += $"{AppConsts.AppVersion}";
             LoadAppSetting();
-            #region 控件初始化
-            var controls = new List<Control>() { groupBox2, groupBox5, groupBox6 };
-            foreach (var control in controls)
-            {
-                foreach (var c in control.Controls)
-                {
-                    if (c is NumericUpDown)
-                    {
-                        (c as NumericUpDown).ValueChanged += (s, e) =>
-                        {
-                            UpdateAppSetting();
-                        };
-                    }
-                    else if (c is TextBox)
-                    {
-                        (c as TextBox).TextChanged += (s, e) =>
-                        {
-                            UpdateAppSetting();
-                        };
-                    }
-                    else if (c is CheckBox)
-                    {
-                        (c as CheckBox).Click += (s, e) =>
-                        {
-                            UpdateAppSetting();
-                        };
-                    }
-                    else if (c is RadioButton)
-                    {
-                        (c as RadioButton).Click += (s, e) =>
-                        {
-                            UpdateAppSetting();
-                        };
-                    }
-                }
-            }
-            #endregion
+            InitTaskDispatchManager();
 
             #region 数据初始化
             this.textBox_SmsName.Text = CommonHelper.GetHostName();
-            this._appSettings.Update(opt => opt.SmsName = CommonHelper.GetHostName());
             foreach (var item in new ManagementObjectSearcher("Select * from Win32_ComputerSystem").Get())
             {
                 toolStripStatusLabel1.Text = $"CPU:{item["NumberOfLogicalProcessors"]}";
@@ -288,10 +803,7 @@ namespace MainClient
         }
         private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
         {
-            isRunning = false;
-            isProcessingLogs = false;
             cts?.Cancel();
-
             foreach (var consumer in processOfList.Values)
             {
                 try
@@ -310,324 +822,182 @@ namespace MainClient
         }
         private void MainForm_Load(object sender, EventArgs e)
         {
-            var commandLineArgs = System.Environment.GetCommandLineArgs();
-            var isRestart = System.Environment.GetCommandLineArgs().Any(p => p.StartsWith("restart"));
-            if (isRestart)
+            this.MainFormHandle = (int)this.Handle;
+            StartLogConsumer();
+            _logger.LogInformation("应用已启动");
+            Task.Run(() =>
             {
-                sync.Post((p) =>
+                this.InvokeOnUiThreadIfRequired(() =>
                 {
-                    buttonStart.PerformClick();
-                }, null);
-            }
 
-
-        }
-
-        private void AddTaskInfo(JToken tasks)
-        {
-            this.Invoke(new MethodInvoker(() =>
-            {
-                this.taskInfoListView.BeginUpdate();
-                this.taskInfoListView.Items.Clear();
-                try
-                {
-                    foreach (var task in tasks)
+                    #region 控件初始化
+                    var controls = new List<Control>() { groupBox2 };
+                    foreach (var control in controls)
                     {
-                        ListViewItem lvi = new ListViewItem();
-                        lvi.Tag = task["id"].ToString();
-                        lvi.Text = $"{task["type"].ToString()}-{task["title"].ToString()}";
-                        lvi.SubItems.Add("");
-                        lvi.SubItems.Add("");
-                        lvi.SubItems.Add("");
-                        lvi.SubItems.Add("");
-                        lvi.SubItems.Add("");
-                        this.taskInfoListView.Items.Add(lvi);
+                        foreach (var c in control.Controls)
+                        {
+                            if (c is NumericUpDown)
+                            {
+                                (c as NumericUpDown).ValueChanged += (s, e) =>
+                                {
+                                    UpdateAppSetting();
+                                };
+                            }
+                            else if (c is TextBox)
+                            {
+                                (c as TextBox).TextChanged += (s, e) =>
+                                {
+                                    UpdateAppSetting();
+                                };
+                            }
+                            else if (c is CheckBox)
+                            {
+                                (c as CheckBox).Click += (s, e) =>
+                                {
+                                    UpdateAppSetting();
+                                };
+                            }
+                            else if (c is RadioButton)
+                            {
+                                (c as RadioButton).Click += (s, e) =>
+                                {
+                                    UpdateAppSetting();
+                                };
+                            }
+                            else if (c is ComboBox)
+                            {
+                                (c as ComboBox).SelectedIndexChanged += (s, e) =>
+                                {
+                                    UpdateAppSetting();
+                                };
+                            }
+                        }
                     }
-                }
-                finally
-                {
-                    this.taskInfoListView.EndUpdate();
-                }
+                    #endregion
 
-            }));
+                });
+            });
+
         }
 
         #region 应用设置
         private void LoadAppSetting()
         {
 
-            textBox_ProxyIpUrl.Text = _appSettings.Value.ProxyIpUrl;
-            textBox_TaskApiUrl.Text = _appSettings.Value.TaskApiUrl;
-            textBox_DevApiUrl.Text = _appSettings.Value.DevApiUrl;
-            numericUpDown_FetchTaskInterval.Value = _appSettings.Value.FetchTaskInterval;
-            numericUpDown_UVInterval.Value = _appSettings.Value.UVInterval;
-            numericUpDown_MaximumConcurrency.Value = _appSettings.Value.MaximumConcurrency;
-            numericUpDown_MaximumCacheCount.Value = _appSettings.Value.MaximumCacheCount;
-            numericUpDown_PageLoadingTimeout.Value = _appSettings.Value.PageLoadingTimeout;
-            textBox_TaskName.Text = _appSettings.Value.TaskName;
-            numericUpDown_Multiple.Value = _appSettings.Value.Multiple;
-            numericUpDown_MainResetTimeout.Value = _appSettings.Value.MainResetTimeout;
-            numericUpDown_SubResetTimeout.Value = _appSettings.Value.SubResetTimeout;
-            checkBox_IsHiddenMode.Checked = _appSettings.Value.IsHiddenMode;
-            checkBox_IsProxyMode.Checked = _appSettings.Value.IsProxyMode;
-            checkBox_IsRealIp.Checked = _appSettings.Value.IsRealIp;
-            checkBox_IsCheckIp.Checked = _appSettings.Value.IsCheckIp;
-            checkBox_DisableUserCache.Checked = _appSettings.Value.DisableUserCache;
-            checkBox_DisableLoadImage.Checked = _appSettings.Value.DisableLoadImage;
-            checkBox_UseCacheImg.Checked = _appSettings.Value.UseCacheImg;
-            checkBox_UseCacheVideo.Checked = _appSettings.Value.UseCacheVideo;
-            checkBox_UseCacheCss.Checked = _appSettings.Value.UseCacheCss;
-            checkBox_UseCacheJS.Checked = _appSettings.Value.UseCacheJS;
-            checkBox_SendSms.Checked = _appSettings.Value.SendSms;
-            textBox_SmsName.Text = _appSettings.Value.SmsName;
-            textBox_SmsPhone.Text = _appSettings.Value.SmsPhone;
-            numericUpDown_SendSmsTimeout.Value = _appSettings.Value.SendSmsTimeout;
-            var usingDevIndex = _appSettings.Value.UsingDevIndex;
+            textBox_ProxyIpUrl.Text = _appSettings.ProxyIpUrl;
+            textBox_TaskApiUrl.Text = _appSettings.TaskApiUrl;
+            textBox_DevApiUrl.Text = _appSettings.DevApiUrl;
+            numericUpDown_FetchTaskInterval.Value = _appSettings.TaskPullIntervalMs;
+            numericUpDown_UVInterval.Value = _appSettings.UvExecutionIntervalMs;
+            numericUpDown_MaxConcurrency.Value = _appSettings.MaxConcurrency;
+            numericUpDown_PageLoadingTimeout.Value = _appSettings.PageLoadTimeout;
+            textBox_TaskName.Text = _appSettings.TaskName;
+            numericUpDown_Multiple.Value = _appSettings.Multiple;
+            numericUpDown_MainResetTimeout.Value = _appSettings.MainResetTimeout;
+            numericUpDown_SubResetTimeout.Value = _appSettings.SubResetTimeout;
+            checkBox_IsHiddenMode.Checked = _appSettings.IsHiddenMode;
+            checkBox_IsProxyMode.Checked = _appSettings.IsProxyMode;
+            checkBox_IsRealIp.Checked = _appSettings.IsRealIp;
+            checkBox_IsCheckIp.Checked = _appSettings.IsCheckIp;
+            checkBox_DisableUserCache.Checked = _appSettings.DisableUserCache;
+            checkBox_SendSms.Checked = _appSettings.SendSms;
+            textBox_SmsName.Text = _appSettings.SmsName;
+            textBox_SmsPhone.Text = _appSettings.SmsPhone;
+            numericUpDown_SendSmsTimeout.Value = _appSettings.SendSmsTimeout;
+            var usingDevIndex = _appSettings.UsingDevIndex;
             if (usingDevIndex == 2)
                 radioButton_UsingRealDev.Checked = true;
             else if (usingDevIndex == 3)
                 radioButton_UseLocalDev.Checked = true;
             else
                 radioButton_UseSystemDev.Checked = true;
-            checkBox_IsDetailLog.Checked = _appSettings.Value.IsDetailLog;
+            checkBox_IsDetailLog.Checked = _appSettings.IsDetailLog;
 
-            numericUpDown_IpTtl.Value = _appSettings.Value.IpTtl;
-            numericUpDown_DspBidPrice.Value = _appSettings.Value.DspBidPrice;
+            numericUpDown_IpTtl.Value = _appSettings.IpTtl;
+            numericUpDown_DspBidPrice.Value = _appSettings.DspBidPrice;
 
-            checkBox_UVsTriggerOne.Checked = _appSettings.Value.UVsTriggerOne;
-            checkBox_PersistAdx.Checked = _appSettings.Value.PersistAdx;
+            checkBox_UVsTriggerOne.Checked = _appSettings.UVsTriggerOne;
+            checkBox_PersistAdx.Checked = _appSettings.PersistAdx;
         }
         private void UpdateAppSetting()
         {
-            _appSettings.Update(opt =>
-            {
-                opt.ProxyIpUrl = textBox_ProxyIpUrl.Text;
-                opt.TaskApiUrl = textBox_TaskApiUrl.Text;
-                opt.DevApiUrl = textBox_DevApiUrl.Text;
-                opt.FetchTaskInterval = (int)numericUpDown_FetchTaskInterval.Value;
-                opt.UVInterval = (int)numericUpDown_UVInterval.Value;
-                opt.MaximumConcurrency = (int)numericUpDown_MaximumConcurrency.Value;
-                opt.MaximumCacheCount = (int)numericUpDown_MaximumCacheCount.Value;
-                opt.PageLoadingTimeout = (int)numericUpDown_PageLoadingTimeout.Value;
-                opt.TaskName = textBox_TaskName.Text;
-                opt.Multiple = (int)numericUpDown_Multiple.Value;
-                opt.MainResetTimeout = (int)numericUpDown_MainResetTimeout.Value;
-                opt.SubResetTimeout = (int)numericUpDown_SubResetTimeout.Value;
-                opt.IsHiddenMode = checkBox_IsHiddenMode.Checked;
-                opt.IsProxyMode = checkBox_IsProxyMode.Checked;
-                opt.IsRealIp = checkBox_IsRealIp.Checked;
-                opt.IsCheckIp = checkBox_IsCheckIp.Checked;
-                opt.DisableUserCache = checkBox_DisableUserCache.Checked;
-                opt.DisableLoadImage = checkBox_DisableLoadImage.Checked;
-                opt.UseCacheImg = checkBox_UseCacheImg.Checked;
-                opt.UseCacheVideo = checkBox_UseCacheVideo.Checked;
-                opt.UseCacheCss = checkBox_UseCacheCss.Checked;
-                opt.UseCacheJS = checkBox_UseCacheJS.Checked;
-                opt.SendSms = checkBox_SendSms.Checked;
-                opt.SmsName = textBox_SmsName.Text;
-                opt.SmsPhone = textBox_SmsPhone.Text;
-                opt.SendSmsTimeout = (int)numericUpDown_SendSmsTimeout.Value;
-                if (radioButton_UsingRealDev.Checked)
-                    opt.UsingDevIndex = 2;
-                else if (radioButton_UseLocalDev.Checked)
-                    opt.UsingDevIndex = 3;
-                else
-                    opt.UsingDevIndex = 1;
-                opt.IsDetailLog = checkBox_IsDetailLog.Checked;
+            _appSettings.ProxyIpUrl = textBox_ProxyIpUrl.Text;
+            _appSettings.TaskApiUrl = textBox_TaskApiUrl.Text;
+            _appSettings.DevApiUrl = textBox_DevApiUrl.Text;
+            _appSettings.TaskPullIntervalMs = (int)numericUpDown_FetchTaskInterval.Value;
+            _appSettings.UvExecutionIntervalMs = (int)numericUpDown_UVInterval.Value;
+            _appSettings.MaxConcurrency = (int)numericUpDown_MaxConcurrency.Value;
+            _appSettings.PageLoadTimeout = (int)numericUpDown_PageLoadingTimeout.Value;
+            _appSettings.TaskName = textBox_TaskName.Text;
+            _appSettings.Multiple = (int)numericUpDown_Multiple.Value;
+            _appSettings.MainResetTimeout = (int)numericUpDown_MainResetTimeout.Value;
+            _appSettings.SubResetTimeout = (int)numericUpDown_SubResetTimeout.Value;
+            _appSettings.IsHiddenMode = checkBox_IsHiddenMode.Checked;
+            _appSettings.IsProxyMode = checkBox_IsProxyMode.Checked;
+            _appSettings.IsRealIp = checkBox_IsRealIp.Checked;
+            _appSettings.IsCheckIp = checkBox_IsCheckIp.Checked;
+            _appSettings.DisableUserCache = checkBox_DisableUserCache.Checked;
+            _appSettings.SendSms = checkBox_SendSms.Checked;
+            _appSettings.SmsName = textBox_SmsName.Text;
+            _appSettings.SmsPhone = textBox_SmsPhone.Text;
+            _appSettings.SendSmsTimeout = (int)numericUpDown_SendSmsTimeout.Value;
+            if (radioButton_UsingRealDev.Checked)
+                _appSettings.UsingDevIndex = 2;
+            else if (radioButton_UseLocalDev.Checked)
+                _appSettings.UsingDevIndex = 3;
+            else
+                _appSettings.UsingDevIndex = 1;
+            _appSettings.IsDetailLog = checkBox_IsDetailLog.Checked;
 
 
-                opt.IpTtl = (int)numericUpDown_IpTtl.Value;
-                opt.DspBidPrice = (int)numericUpDown_DspBidPrice.Value;
-                opt.UVsTriggerOne = checkBox_UVsTriggerOne.Checked;
-                opt.PersistAdx = checkBox_PersistAdx.Checked;
-            });
+            _appSettings.IpTtl = (int)numericUpDown_IpTtl.Value;
+            _appSettings.DspBidPrice = (int)numericUpDown_DspBidPrice.Value;
+            _appSettings.UVsTriggerOne = checkBox_UVsTriggerOne.Checked;
+            _appSettings.PersistAdx = checkBox_PersistAdx.Checked;
+
+            UserConfigService.Save("AppSettings", _appSettings);
         }
         #endregion
 
         private readonly ConcurrentDictionary<string, ConsumerModel> processOfList = new();
 
 
-
-        /// <summary>
-        /// 更新任务状态信息
-        /// </summary>
-        private void UpdateStatInfo()
+        private async void btnStartStop_Click(object sender, EventArgs e)
         {
-            var snapshot = statistics.GetSnapshot();
-            var requests = snapshot.GetSessionValue(TaskStatisticNames.Requests);
-            var processed = snapshot.GetSessionValue(TaskStatisticNames.Processed);
-            this.BeginInvoke(new Action(() =>
-            {
-                label5.Text = $"获取任务:{snapshot.GetSessionValue(TaskStatisticNames.TasksFetched)} 请求数量:{requests}";
-                label6.Text = requests > 0
-                    ? $"处理数量:{processed},{processed / (double)requests * 100:N1}%"
-                    : "处理数量:0";
-                label7.Text = $"曝光数量:{snapshot.GetSessionValue(TaskStatisticNames.Exposures)}";
-                label8.Text = $"点击数量:{snapshot.GetSessionValue(TaskStatisticNames.Clicks)}";
-                toolStripStatusLabel2.Text = $"进程：{this.processOfList.Count()}";
-                toolStripStatusLabel3.Text = $"请求总量：{snapshot.GetTotalValue(TaskStatisticNames.Requests)}";
-                toolStripStatusLabel4.Text = $"处理总量：{snapshot.GetTotalValue(TaskStatisticNames.Processed)}";
-                toolStripStatusLabel5.Text = $"曝光总量：{snapshot.GetTotalValue(TaskStatisticNames.Exposures)}";
-                toolStripStatusLabel6.Text = $"点击总量：{snapshot.GetTotalValue(TaskStatisticNames.Clicks)}";
-                if (sw.IsRunning)
-                {
-                    label9.Text = $"运行时间:{sw.Elapsed.Minutes}分{sw.Elapsed.Seconds}秒";
-                }
-            }));
-        }
 
-        private async void buttonStart_Click(object sender, EventArgs e)
-        {
-            await runStateGate.WaitAsync();
+            btnStartStop.Enabled = false;
             try
             {
-                if (runTask is { IsCompleted: false })
+                await _taskManager.ToggleAsync(new TaskDispatchStopOptions
                 {
-                    await RequestStopAsync(restart: false);
-                    return;
-                }
-
-                await StartRunAsync();
+                    Timeout = TimeSpan.FromSeconds(8),
+                    // 停止时保存队列中还没取出的任务
+                    PersistPending = true
+                });
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "切换运行状态失败");
-                LogWriteLine($"切换运行状态失败：{ex}");
-                SetRunUi(false);
+                MessageBox.Show(
+                    ex.ToString(),
+                    "任务调度异常",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
             }
             finally
             {
-                runStateGate.Release();
+                RefreshStartStopButton(_taskManager.State);
             }
         }
 
-        private Task StartRunAsync()
-        {
-            if (!File.Exists(System.IO.Path.Combine(System.AppDomain.CurrentDomain.SetupInformation.ApplicationBase, "CefClient", "CefClient.exe")))
-            {
-                MessageBox.Show("CefClient.exe不存在!");
-                return Task.CompletedTask;
-            }
 
-            var concurrency = Math.Max(1, _appSettings.Value.MaximumConcurrency);
-            var capacity = Math.Max(concurrency, _appSettings.Value.MaximumCacheCount);
-            ProcessLogs();
-            isRestart = false;
-            isRunning = true;
-            CommonHelper.ClearAllErrorMsgDialog();
-            statistics.ResetSession();
-            this.mainWnd = (int)this.Handle;
-            this.processOfList.Clear();
-            sw.Reset();
-            sw.Start();
-            cts?.Dispose();
-            cts = new CancellationTokenSource();
-            SetRunUi(true);
-            runTask = RunSessionAsync(concurrency, capacity, cts.Token);
-            return Task.CompletedTask;
-        }
 
-        private async Task RequestStopAsync(bool restart)
-        {
-            isRestart = restart;
-            isRunning = false;
-            isProcessingLogs = false;
-            buttonStart.Enabled = false;
-            buttonStart.Text = restart ? "重启中..." : "停止中...";
-            buttonStart.ForeColor = Color.Black;
-            cts?.Cancel();
 
-            var completion = runTask;
-            if (completion is not null)
-            {
-                await completion;
-            }
-        }
 
-        private async Task RunSessionAsync(int concurrency, int capacity, CancellationToken token)
-        {
-            var channel = Channel.CreateBounded<JObject>(
-                    new BoundedChannelOptions(capacity)
-                    {
-                        SingleWriter = true,
-                        SingleReader = false,
-                        FullMode = BoundedChannelFullMode.Wait
-                    });
 
-            try
-            {
-                var tasks = new List<Task>(concurrency + 3)
-                {
-                    ProduceWithWhileAndTryWrite(channel.Writer, token),
-                    RefreshStatisticsAsync(token),
-                    MonitorRunLifetimeAsync(token)
-                };
-                for (var index = 1; index <= concurrency; index++)
-                {
-                    tasks.Add(ConsumerAsync(channel.Reader, index, token));
-                }
-
-                await Task.WhenAll(tasks);
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested)
-            {
-                // 用户停止和计划重启均为正常控制流。
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "运行会话异常退出");
-                LogWriteLine($"运行会话异常退出：{ex}");
-            }
-            finally
-            {
-                isRunning = false;
-                isProcessingLogs = false;
-                sw.Stop();
-                try
-                {
-                    await _adxHelper.UpdateTaskStat();
-                    await statistics.SaveAsync();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "保存运行状态失败");
-                    LogWriteLine($"保存运行状态失败：{ex.Message}");
-                }
-                if (isRestart)
-                {
-                    sync.Post((p) =>
-                    {
-                        CommonHelper.ProcessRestart();
-                    }, null);
-                }
-                else
-                {
-                    if (!IsDisposed && !Disposing)
-                    {
-                        this.sync.Post(p => SetRunUi(false), null);
-                    }
-                }
-            }
-        }
-
-        private async Task RefreshStatisticsAsync(CancellationToken token)
-        {
-            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
-            var ticks = 0;
-            while (await timer.WaitForNextTickAsync(token))
-            {
-                UpdateStatInfo();
-                if (++ticks % 5 == 0)
-                {
-                    await _adxHelper.UpdateTaskStat();
-                    await statistics.SaveAsync(token);
-                }
-            }
-        }
 
         private async Task MonitorRunLifetimeAsync(CancellationToken token)
         {
-            var minutes = _appSettings.Value.MainResetTimeout;
+            var minutes = _appSettings.MainResetTimeout;
             if (minutes <= 0)
             {
                 await Task.Delay(Timeout.InfiniteTimeSpan, token);
@@ -637,52 +1007,29 @@ namespace MainClient
             var seconds = Math.Max(1, (long)minutes * 60 + Random.Shared.Next(-5, 6));
             await Task.Delay(TimeSpan.FromSeconds(seconds), token);
             LogWriteLine("达到主进程重启周期，准备重启任务");
-            isRestart = true;
-            isRunning = false;
-            isProcessingLogs = false;
             cts?.Cancel();
         }
 
         private void SetRunUi(bool running)
         {
             buttonClear.Enabled = !running;
-            buttonStart.Enabled = true;
-            buttonStart.Text = running ? "停止" : "开始";
-            buttonStart.ForeColor = running ? Color.Blue : Color.Black;
+            btnStartStop.Enabled = true;
+            btnStartStop.Text = running ? "停止" : "开始";
+            btnStartStop.ForeColor = running ? Color.Blue : Color.Black;
         }
         private void buttonClear_Click(object sender, EventArgs e)
         {
 
             buttonClear.Enabled = false;
-            buttonStart.Enabled = false;
+            btnStartStop.Enabled = false;
             Task.Factory.StartNew(() =>
             {
                 CommonHelper.ClearProcesses(new string[] { "CefClient", "CefSharp.BrowserSubprocess", "WerFault" });
-                //GC.Collect();
-                //GC.WaitForPendingFinalizers();
-                //foreach (Process process in Process.GetProcesses())
-                //{
-                //    try
-                //    {
-                //        NativeMethod.EmptyWorkingSet(process.Handle);
-                //    }
-                //    catch (Exception)
-                //    {
-                //    }
-                //}
-                ////try
-                ////{
-                ////   // Directory.Delete(System.IO.Path.Combine(System.AppDomain.CurrentDomain.SetupInformation.ApplicationBase, "chrome", "User Data"), recursive: true);
-                ////}
-                ////catch (Exception ex)
-                ////{
-                ////    Debug.Write(ex.Message);
-                ////}
             }).ContinueWith(t =>
             {
                 this.BeginInvoke(new MethodInvoker(() =>
                 {
-                    buttonStart.Enabled = true;
+                    btnStartStop.Enabled = true;
                     buttonClear.Enabled = true;
                 }));
 
@@ -698,76 +1045,6 @@ namespace MainClient
             CommonHelper.CreateShortcut("曝光服务");
         }
 
-
-
-
-        public async Task ProduceWithWhileAndTryWrite(ChannelWriter<JObject> writer, CancellationToken token)
-        {
-            try
-            {
-                while (this.isRunning && !this.isRestart && !token.IsCancellationRequested)
-                {
-                    try
-                    {
-                        var content = await this._adxHelper.GetTaskAsync(
-                            $"{_appSettings.Value.TaskApiUrl}?type=1&action=getTask&task={_appSettings.Value.TaskName}&test=0&_t={System.DateTime.Now.Ticks}",
-                            token);
-                        if (!string.IsNullOrWhiteSpace(content))
-                        {
-                            if (content.Equals("empty"))
-                            {
-                                sync.Post((p) =>
-                                {
-                                    this.taskInfoListView.Items.Clear();
-                                }, null);
-                                LogWriteLine($"共取到[0]条任务");
-                            }
-                            else
-                            {
-                                var tasks = (JObject)JsonConvert.DeserializeObject(content);
-                                int taskCount = tasks["task"].Count();
-                                if (taskCount > 0)
-                                {
-                                    statistics.Increment(TaskStatisticNames.TasksFetched, taskCount);
-                                    AddTaskInfo(tasks["task"]);
-                                    LogWriteLine($"新增加{tasks["task"].Count()}条任务");
-                                    for (int i = 0; i < _appSettings.Value.Multiple; i++)
-                                    {
-                                        if (!this.isRunning || this.isRestart || token.IsCancellationRequested)
-                                        {
-                                            break;
-                                        }
-
-                                        foreach (JObject task in tasks["task"])
-                                        {
-                                            await writer.WriteAsync((JObject)task.DeepClone(), token);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    catch (OperationCanceledException) when (token.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "获取或分发任务失败");
-                        LogWriteLine($"获取或分发任务失败：{ex.Message}");
-                    }
-                    await Task.Delay(_appSettings.Value.FetchTaskInterval, token);
-                }
-            }
-            catch
-            {
-                throw;
-            }
-            finally
-            {
-                writer.TryComplete();
-            }
-        }
 
         static SemaphoreSlim _mutex = new SemaphoreSlim(1);
         private async Task SaveAdx(JObject adx, int type = 1)
@@ -804,95 +1081,16 @@ namespace MainClient
             int ClickRate,
             string DeviceClientId,
             string Url,
-            JObject AdParam,
-            JObject RawTask);
+            JToken AdParam,
+            JToken RawTask);
 
         private sealed record NetworkContext(
             string ProxyServer,
             string RealIp,
-            JObject IpInfo);
+            JToken IpInfo);
 
-        /// <summary>
-        /// 安全消费 Channel 中的任务。
-        /// 主要职责仅保留：读取任务、确保子进程存在、处理任务、回收子进程。
-        /// </summary>
-        public async Task ConsumerAsync(
-            ChannelReader<JObject> reader,
-            int processIndex,
-            CancellationToken token)
-        {
-            ArgumentNullException.ThrowIfNull(reader);
 
-            ClientRuntime? runtime = null;
-            var processLifetime = GetProcessLifetime();
 
-            try
-            {
-                await foreach (var task in reader.ReadAllAsync(token))
-                {
-                    try
-                    {
-                        runtime = await EnsureClientRuntimeAsync(
-                            runtime,
-                            processIndex,
-                            token);
-
-                        if (runtime is null)
-                        {
-                            LogWriteLine($"消费者[{processIndex}]无法启动 CefClient，跳过任务。");
-                            continue;
-                        }
-
-                        await ProcessOneTaskAsync(
-                            task,
-                            runtime,
-                            processIndex,
-                            processLifetime,
-                            token);
-
-                        if (HasExceededLifetime(runtime, processLifetime))
-                        {
-                            await StopClientRuntimeAsync(
-                                runtime,
-                                $"运行时间超过 {processLifetime}");
-
-                            runtime = null;
-                        }
-                        else if (!IsProcessAlive(runtime.Process))
-                        {
-                            await StopClientRuntimeAsync(runtime, "子进程已经退出");
-                            runtime = null;
-                        }
-                    }
-                    catch (OperationCanceledException) when (token.IsCancellationRequested)
-                    {
-                        break;
-                    }
-                    catch (Exception ex)
-                    {
-                        // 不要只记录 ex.Message，否则会丢失堆栈和内部异常。
-                        LogWriteLine($"消费者[{processIndex}]处理任务异常：{ex}");
-
-                        if (runtime is not null && !IsProcessAlive(runtime.Process))
-                        {
-                            await StopClientRuntimeAsync(runtime, "异常后发现子进程不可用");
-                            runtime = null;
-                        }
-                    }
-                }
-            }
-            catch (OperationCanceledException) when (token.IsCancellationRequested)
-            {
-                // 正常取消。
-            }
-            finally
-            {
-                if (runtime is not null)
-                {
-                    await StopClientRuntimeAsync(runtime, "消费者退出");
-                }
-            }
-        }
 
         private async Task<ClientRuntime?> EnsureClientRuntimeAsync(
             ClientRuntime? current,
@@ -954,14 +1152,12 @@ namespace MainClient
                     process.Exited += (_, _) =>
                     {
                         processOfList.TryRemove(clientId, out _);
-                        LogDetailInfo(
-                            $"退出进程：clientId={clientId}, path={executablePath}");
+                        LogWriteLine($"退出进程：clientId={clientId}, path={executablePath}");
                     };
 
                     if (!process.Start())
                     {
-                        throw new InvalidOperationException(
-                            $"Process.Start 返回 false：{executablePath}");
+                        throw new InvalidOperationException($"Process.Start 返回 false：{executablePath}");
                     }
 
                     consumer.ProcessId = process.Id;
@@ -995,8 +1191,7 @@ namespace MainClient
                             $"CefClient[{processIndex}] 30 秒内未完成初始化。");
                     }
 
-                    LogDetailInfo(
-                        $"创建进程完成：PID={process.Id}, path={executablePath}");
+                    LogWriteLine($"创建进程完成：PID={process.Id}, path={executablePath}");
 
                     await Task.Delay(
                         Random.Shared.Next(500, 1001),
@@ -1063,13 +1258,11 @@ namespace MainClient
             };
 
             // 使用 ArgumentList，避免手工拼接参数时的引号和转义问题。
-            startInfo.ArgumentList.Add($"mainWnd={mainWnd}");
-            startInfo.ArgumentList.Add(
-                $"isHiddenMode={_appSettings.Value.IsHiddenMode}");
+            startInfo.ArgumentList.Add($"mainWnd={MainFormHandle}");
+            startInfo.ArgumentList.Add($"isHiddenMode={_appSettings.IsHiddenMode}");
             startInfo.ArgumentList.Add($"clientId={clientId}");
             startInfo.ArgumentList.Add($"--consumer-id={processIndex}");
             startInfo.ArgumentList.Add($"--runtime-root={runtimeRoot}");
-
             return startInfo;
         }
 
@@ -1102,7 +1295,7 @@ namespace MainClient
         }
 
         private async Task ProcessOneTaskAsync(
-            JObject task,
+            JToken task,
             ClientRuntime runtime,
             int processIndex,
             TimeSpan processLifetime,
@@ -1115,7 +1308,6 @@ namespace MainClient
                 return;
             }
 
-            var exposure = _adxHelper.GetOrAddTaskStatus(parsed.TaskId);
 
             var network = await TryGetNetworkContextAsync(
                 parsed.RawTask,
@@ -1124,32 +1316,29 @@ namespace MainClient
 
             if (network is null)
             {
-                LogWriteLine(
-                    $"任务[{parsed.TaskId}_{processIndex}]获取可用网络失败。");
+                LogWriteLine($"任务[{parsed.TaskId}_{processIndex}]获取可用网络失败。");
                 return;
             }
 
+
             var os = ResolveOs(parsed.DeviceClientId);
-            var ipTtlSeconds = Math.Max(1, _appSettings.Value.IpTtl);
-            var uvIntervalMs = Math.Max(0, _appSettings.Value.UVInterval);
+            var ipTtlSeconds = Math.Max(1, _appSettings.IpTtl);
+            var uvIntervalMs = Math.Max(0, _appSettings.UvExecutionIntervalMs);
             var ipDeadline = DateTime.UtcNow.AddSeconds(ipTtlSeconds);
-            var hasCheckedFirstAdxInCurrentTask = false;
 
             for (var uv = 0; uv < parsed.TotalUv; uv++)
             {
                 token.ThrowIfCancellationRequested();
 
-                if (!IsProcessAlive(runtime.Process) ||
-                    HasExceededLifetime(runtime, processLifetime))
+                if (!IsProcessAlive(runtime.Process) || HasExceededLifetime(runtime, processLifetime))
                 {
-                    LogWriteLine(
-                        $"停止任务[{parsed.TaskId}_{processIndex}]：客户端不可用或已到重启时间。");
+                    LogWriteLine($"停止任务[{parsed.TaskId}_{processIndex}]：客户端不可用或已到重启时间。");
                     break;
                 }
 
                 var triggeredClick = await ExecuteUvAsync(uv);
 
-                if (_appSettings.Value.UVsTriggerOne && triggeredClick)
+                if (_appSettings.UVsTriggerOne && triggeredClick)
                 {
                     break;
                 }
@@ -1161,31 +1350,22 @@ namespace MainClient
                 {
                     if (DateTime.UtcNow.AddMilliseconds(uvIntervalMs) > ipDeadline)
                     {
-                        LogWriteLine(
-                            $"跳过UV[{parsed.TaskId}_{processIndex}_{uv}]，" +
-                            $"预计执行时间超出IP有效期 {ipTtlSeconds}s。");
+                        LogWriteLine($"跳过UV[{parsed.TaskId}_{processIndex}_{uv}]，" + $"预计执行时间超出IP有效期 {ipTtlSeconds}s。");
                         return false;
                     }
-
                     await Task.Delay(uvIntervalMs, token);
                 }
 
-                if (DateTime.UtcNow > ipDeadline ||
-                    !IsProcessAlive(runtime.Process))
+                if (DateTime.UtcNow > ipDeadline || !IsProcessAlive(runtime.Process))
                 {
                     return false;
                 }
 
-                statistics.Increment(TaskStatisticNames.Requests);
-                exposure.AddRequests();
-
                 JObject dev;
-
                 try
                 {
                     var devResult = await _devHelper.GetDevByOS(os, 200);
-                    dev = devResult as JObject
-                        ?? throw new InvalidOperationException("设备数据不是 JObject。");
+                    dev = devResult as JObject ?? throw new InvalidOperationException("设备数据不是 JObject。");
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -1193,8 +1373,7 @@ namespace MainClient
                 }
                 catch (Exception ex)
                 {
-                    LogWriteLine(
-                        $"获取设备信息失败[{parsed.TaskId}_{processIndex}_{uv}]：{ex}");
+                    LogWriteLine($"获取设备信息失败[{parsed.TaskId}_{processIndex}_{uv}]：{ex}");
                     return false;
                 }
 
@@ -1202,15 +1381,21 @@ namespace MainClient
 
                 try
                 {
-                    adx = await _adxHelper.GetAdRequest(
-                        parsed.RawTask,
-                        parsed.AdParam,
-                        dev,
-                        os,
-                        network.RealIp,
-                        network.ProxyServer,
-                        network.IpInfo,
-                        _appSettings.Value.IsProxyMode);
+                    _aggregator.EnqueueTaskState(new TrafficTaskStateEvent(parsed.TaskId, TrafficTaskStateKind.Request, 1));
+
+
+                    //adx = await _adxHelper.GetAdRequest(
+                    //    parsed.RawTask,
+                    //    parsed.AdParam,
+                    //    dev,
+                    //    os,
+                    //    network.RealIp,
+                    //    network.ProxyServer,
+                    //    network.IpInfo,
+                    //    _appSettings.IsProxyMode);
+                    adx = JObject.Parse(Resources.adx_json);
+
+
                 }
                 catch (OperationCanceledException) when (token.IsCancellationRequested)
                 {
@@ -1232,36 +1417,32 @@ namespace MainClient
                     return false;
                 }
 
-                if (_appSettings.Value.PersistAdx)
+                if (_appSettings.PersistAdx)
                     await SaveAdx(adx!, 0);
 
                 if (!HasAcceptableBid(adx!))
                 {
                     LogWriteLine(
                         $"请求广告[{parsed.TaskId}_{processIndex}_{uv}]单价过低，" +
-                        $"threshold={_appSettings.Value.DspBidPrice}, " +
+                        $"threshold={_appSettings.DspBidPrice}, " +
                         $"proxy={network.ProxyServer}");
                     return false;
                 }
 
-                if (_appSettings.Value.PersistAdx)
+                if (_appSettings.PersistAdx)
                     await SaveAdx(adx!, 1);
 
                 var cacheIndex = $"s{processIndex}_{uv}";
-                var mayClick = !hasCheckedFirstAdxInCurrentTask && parsed.ClickRate > 0;
-                if (mayClick)
-                    hasCheckedFirstAdxInCurrentTask = true;
+                var clickJump = await _aggregator.CanClickthroughAsync(parsed.TaskId, parsed.ClickRate);
 
-                using var submission = exposure.ReserveSubmission(parsed.ClickRate, mayClick);
-                var clickJump = submission.Click;
 
                 var args = new JObject
                 {
                     ["task"] = parsed.RawTask,
                     ["dev"] = dev,
-                    ["isShowLog"] = _appSettings.Value.IsDetailLog,
-                    ["isHiddenMode"] = _appSettings.Value.IsHiddenMode,
-                    ["isProxyMode"] = _appSettings.Value.IsProxyMode,
+                    ["isShowLog"] = _appSettings.IsDetailLog,
+                    ["isHiddenMode"] = _appSettings.IsHiddenMode,
+                    ["isProxyMode"] = _appSettings.IsProxyMode,
                     ["proxy_server"] = network.ProxyServer,
                     ["ipinfo"] = network.IpInfo,
                     ["realip"] = network.RealIp,
@@ -1271,13 +1452,15 @@ namespace MainClient
                     ["referer"] = string.Empty,
                     ["os"] = (int)os,
                     ["clearDataForOrigin"] = "local_storage",
-                    ["pageLoadingTimeout"] = _appSettings.Value.PageLoadingTimeout,
+                    ["pageLoadingTimeout"] = _appSettings.PageLoadTimeout,
                     ["uv"] = uv
                 };
 
                 args["clickJump"] = clickJump;
                 SendCefLoadMessage(runtime.Consumer, args);
-                submission.Commit();
+
+                _aggregator.EnqueueTaskState(new TrafficTaskStateEvent(parsed.TaskId, TrafficTaskStateKind.Start, 1));
+                var ctr = (await _aggregator.GetClickRatioAsync(parsed.TaskId, parsed.ClickRate)) * 100;
 
                 LogWriteLine(
                     $"提交任务:{parsed.Title}" +
@@ -1285,23 +1468,16 @@ namespace MainClient
                     $"activity={runtime.Consumer.TaskCount}," +
                     $"os={os},proxy={network.ProxyServer}," +
                     $"realIp={network.RealIp},click={clickJump}," +
-                    $"点击比率={submission.ClickThroughRate:N2}%,{uv}/{parsed.TotalUv}");
+                    $"点击比率={ctr:N2}%,{uv}/{parsed.TotalUv}");
 
-                statistics.Increment(TaskStatisticNames.Processed);
-
-                if (runtime.Consumer.TaskCount > parsed.TotalUv)
-                {
-                    await Task.Delay(
-                        TimeSpan.FromSeconds(Random.Shared.Next(3, 5)),
-                        token);
-                }
+                //statistics.Increment(TaskStatisticNames.Processed);
 
                 return clickJump;
             }
         }
 
         private async Task<NetworkContext?> TryGetNetworkContextAsync(
-            JObject task,
+            JToken task,
             int processIndex,
             CancellationToken token)
         {
@@ -1316,7 +1492,7 @@ namespace MainClient
                     var proxyServer = string.Empty;
                     var realIp = string.Empty;
 
-                    if (_appSettings.Value.IsProxyMode)
+                    if (_appSettings.IsProxyMode)
                     {
                         var ipEntity = await _ipHelper.GetProxyIpAsync(task);
 
@@ -1338,7 +1514,7 @@ namespace MainClient
                             proxyServer = $"{host}:{port.Value}";
 
                             // 原方法同时出现 RealIp 与 IsRealIp，建议统一成一个配置项。
-                            if (_appSettings.Value.IsRealIp)
+                            if (_appSettings.IsRealIp)
                             {
                                 realIp = ipEntity.json?["realIp"]?.Value<string>()
                                     ?? string.Empty;
@@ -1356,7 +1532,7 @@ namespace MainClient
                         }
                     }
 
-                    var testResult = _appSettings.Value.IsProxyMode
+                    var testResult = _appSettings.IsProxyMode
                         ? await _ipTester.TestAsync(proxyServer)
                         : await _ipTester.TestAsync();
 
@@ -1372,7 +1548,7 @@ namespace MainClient
                         throw new JsonException("IP检测结果不是有效JSON对象。");
                     }
 
-                    if (_appSettings.Value.IsRealIp)
+                    if (_appSettings.IsRealIp)
                     {
                         var testedRealIp = ipInfo["query"]?.Value<string>();
                         if (!string.IsNullOrWhiteSpace(testedRealIp))
@@ -1404,7 +1580,7 @@ namespace MainClient
         }
 
         private bool TryParseTask(
-            JObject task,
+            JToken task,
             out ParsedTask parsed,
             out string error)
         {
@@ -1495,7 +1671,7 @@ namespace MainClient
             }
 
             var threshold = Convert.ToDecimal(
-                _appSettings.Value.DspBidPrice,
+                _appSettings.DspBidPrice,
                 CultureInfo.InvariantCulture);
 
             foreach (var token in slotAd.SelectTokens("$..dsp_bid_price"))
@@ -1586,7 +1762,7 @@ namespace MainClient
 
         private TimeSpan GetProcessLifetime()
         {
-            var minutes = _appSettings.Value.SubResetTimeout;
+            var minutes = _appSettings.SubResetTimeout;
             if (minutes <= 0)
             {
                 return Timeout.InfiniteTimeSpan;

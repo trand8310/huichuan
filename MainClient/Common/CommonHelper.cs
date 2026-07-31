@@ -1,9 +1,9 @@
-﻿using MainClient.Win32;
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Drawing.Imaging;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using System.Win32;
 
 namespace MainClient.Common
 {
@@ -88,13 +88,13 @@ namespace MainClient.Common
 
 
             // 枚举所有窗口
-            UnsafeNativeMethods.EnumWindows((hWnd, lParam) =>
+            Win32Api.EnumWindows((hWnd, lParam) =>
             {
                 // 检查窗口标题是否匹配
-                string title = UnsafeNativeMethods.GetWindowTitle(hWnd);
+                string title = Win32Api.GetWindowTitle(hWnd);
                 if (allTitles.Contains(title))
                 {
-                    UnsafeNativeMethods.SendMessage(hWnd, UnsafeNativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                    Win32Api.SendMessage(hWnd, Win32Api.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
                 }
                 return true; // 继续枚举下一个窗口
             }, IntPtr.Zero);
@@ -256,10 +256,10 @@ namespace MainClient.Common
             {
                 while (true)
                 {
-                    var windowPtr = UnsafeNativeMethods.FindWindowByCaption(IntPtr.Zero, "CefClient.exe - 应用程序错误");
+                    var windowPtr = Win32Api.FindWindowByCaption(IntPtr.Zero, "CefClient.exe - 应用程序错误");
                     if (windowPtr != IntPtr.Zero)
                     {
-                        UnsafeNativeMethods.SendMessage(windowPtr, UnsafeNativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                        Win32Api.SendMessage(windowPtr, Win32Api.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
                     }
                     else
                     {
@@ -471,10 +471,10 @@ namespace MainClient.Common
         {
             try
             {
-                var _wndRes = UnsafeNativeMethods.FindWindowByCaption(IntPtr.Zero, title);
+                var _wndRes = Win32Api.FindWindowByCaption(IntPtr.Zero, title);
                 if (_wndRes != IntPtr.Zero)
                 {
-                    UnsafeNativeMethods.SendMessage(_wndRes, UnsafeNativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
+                    Win32Api.SendMessage(_wndRes, Win32Api.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
                 }
             }
             catch (Exception ex)
@@ -569,7 +569,7 @@ namespace MainClient.Common
         public static void CreateShortcut(string shortcutName)
         {
             IWshRuntimeLibrary.WshShell wsh = new IWshRuntimeLibrary.WshShell();
-            var shortcutPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), $"{shortcutName}{string.Join("", AppConsts.AppVertion.Split('.').Skip(1).Take(2))}.lnk");
+            var shortcutPath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), $"{shortcutName}{string.Join("", AppConsts.AppVersion.Split('.').Skip(1).Take(2))}.lnk");
             if (System.IO.File.Exists(shortcutPath))
             {
                 System.IO.File.Delete(shortcutPath);

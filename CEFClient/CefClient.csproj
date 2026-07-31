@@ -33,14 +33,14 @@
   <ItemGroup>
     <Compile Include="..\Shared\CefProtocol.cs" Link="Protocol\CefProtocol.cs" />
     <Compile Include="..\Shared\CopyDataMessageQueue.cs" Link="Protocol\CopyDataMessageQueue.cs" />
+	<Compile Include="..\Shared\System\InvokeWinApi.cs" Link="Win32\InvokeWinApi.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="CefSharp.WinForms.NetCore" Version="116.0.230" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
   </ItemGroup>
-  
- 
+
   <ItemGroup>
     <Compile Update="Properties\Resources.Designer.cs">
       <DesignTime>True</DesignTime>

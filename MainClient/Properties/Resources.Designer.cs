@@ -61,6 +61,15 @@ namespace MainClient.Properties {
         }
         
         /// <summary>
+        ///   查找类似 {&quot;code&quot;:&quot;0&quot;,&quot;reason&quot;:&quot;ok! ! !&quot;,&quot;server_time&quot;:&quot;88&quot;,&quot;sid&quot;:&quot;14359957369642138526&quot;,&quot;slot_ad&quot;:[{&quot;ad&quot;:[{&quot;ad_action&quot;:{&quot;action&quot;:&quot;download&quot;},&quot;ad_content&quot;:{&quot;account_id&quot;:&quot;211566923&quot;,&quot;ad_pos_value&quot;:&quot;1&quot;,&quot;adm_fixed_ulk&quot;:&quot;&quot;,&quot;app_key&quot;:&quot;0&quot;,&quot;app_logo&quot;:&quot;https://huichuan-mc.sm.cn/211566908/25112838eb51d9c989a4ce86ec8e0c7864fb56.png&quot;,&quot;app_name&quot;:&quot;学而思网校&quot;,&quot;app_source&quot;:&quot;2&quot;,&quot;app_type&quot;:&quot;-1&quot;,&quot;author_id&quot;:&quot;&quot;,&quot;button_interaction_type&quot;:&quot;1&quot;,&quot;can_shake&quot;:&quot;8&quot;,&quot;category_id&quot;:&quot;0&quot;,&quot;category_name&quot;:&quot;&quot;,&quot;channel_id&quot;:&quot;&quot;,&quot;cid&quot;:&quot;338586&quot;,&quot;component_ids&quot;: [字符串的其余部分被截断]&quot;; 的本地化字符串。
+        /// </summary>
+        internal static string adx_json {
+            get {
+                return ResourceManager.GetString("adx_json", resourceCulture);
+            }
+        }
+        
+        /// <summary>
         ///   查找类似 [
         ///    {
         ///        &quot;code&quot;: &quot;110000&quot;,

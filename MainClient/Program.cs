@@ -1,13 +1,15 @@
 ﻿using MainClient.Common;
+using MainClient.Infrastructure;
+using MainClient.Logging;
+using MainClient.Scheduler;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Newtonsoft.Json;
 using Serilog;
 using Serilog.Events;
-using System.Configuration;
-using System.Diagnostics;
+
+
 
 namespace MainClient
 {
@@ -19,47 +21,50 @@ namespace MainClient
         [STAThread]
         static void Main()
         {
+
+            var appSettings = new AppSettings();
+            UserConfigService.Init(appSettings);
+            var configuration = new ConfigurationBuilder()
+                .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
+                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+                .AddJsonFile("appsettings.user.json", optional: true, reloadOnChange: true)
+                .Build();
+            configuration.GetSection("AppSettings").Bind(appSettings);
+
+            Log.Logger = new LoggerConfiguration()
+            .ReadFrom.Configuration(configuration)
+            .WriteTo.Sink<UiLogSink>()
+            .CreateLogger();
+
+
+
             var builder = new HostBuilder()
                 .ConfigureServices((context, services) =>
                 {
-                    // 读取配置文件
-                    var configuration = new ConfigurationBuilder()
-                        .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
-                        .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
-                        .Build();
-                    services.ConfigureWritable<AppSettings>(configuration.GetSection("App"));
                     services.AddHttpClient();
-                    services.AddSingleton(configuration);
+                    services.AddSingleton(appSettings);
+                    services.AddSingleton<TaskMetricsService>();
                     services.AddSingleton<ProxyTester>();
                     services.AddSingleton<AdxHelper>();
                     services.AddSingleton<DevHelper>();
-                    services.AddSingleton<UrlHelper>();
                     services.AddSingleton<IpHelper>();
                     services.AddTransient<MainForm>();
 
                 })
-                .UseSerilog((_, _, loggerConfiguration) => loggerConfiguration
-                    .MinimumLevel.Verbose()
-                    .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
-                    .Enrich.FromLogContext()
-                    .Enrich.WithThreadId()
-                    .WriteTo.File(
-                        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs", "main-.log"),
-                        rollingInterval: RollingInterval.Day,
-                        retainedFileCountLimit: 20,
-                        fileSizeLimitBytes: 200L * 1024 * 1024,
-                        rollOnFileSizeLimit: true,
-                        shared: true,
-                        outputTemplate: "记录时间：{Timestamp:yyyy-MM-dd HH:mm:ss} 线程ID:[{ThreadId}] 等级：[{Level:u3}] 操作信息：{Message:lj}{NewLine}{Exception}"));
+                .ConfigureLogging(logging =>
+                {
+                    logging.ClearProviders();
+                })
+                .UseSerilog();
+
             using var host = builder.Build();
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-            Application.ThreadException += (_, e) =>
-                CreateProgramLogger(host).LogCritical(e.Exception, "未处理的 UI 线程异常");
-            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
-                CreateProgramLogger(host).LogCritical(e.ExceptionObject as Exception, "未处理的应用程序异常");
-            using (var serviceScope = host.Services.CreateScope())
+            Application.ThreadException += (_, e) => CreateProgramLogger(host).LogCritical(e.Exception, "未处理的 UI 线程异常");
+            AppDomain.CurrentDomain.UnhandledException += (_, e) =>   CreateProgramLogger(host).LogCritical(e.ExceptionObject as Exception, "未处理的应用程序异常");
+
+            using (var scope = host.Services.CreateScope())
             {
-                var services = serviceScope.ServiceProvider;
+                var services = scope.ServiceProvider;
                 try
                 {
                     ApplicationConfiguration.Initialize();
@@ -74,7 +79,7 @@ namespace MainClient
             }
         }
 
-        private static ILogger CreateProgramLogger(IHost host) =>
+        private static Microsoft.Extensions.Logging.ILogger CreateProgramLogger(IHost host) =>
             host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Program");
     }
 }

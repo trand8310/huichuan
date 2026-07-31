@@ -1,4 +1,6 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using MainClient.Infrastructure;
+using MainClient.Models;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System.Buffers.Binary;
@@ -14,10 +16,10 @@ namespace MainClient.Common
     {
 
         private readonly ILogger _logger;
-        private readonly IWritableOptions<AppSettings> _appSettings;
+        private readonly AppSettings _appSettings;
         private readonly IHttpClientFactory _httpClientFactory;
-
-        public AdxHelper(IWritableOptions<AppSettings> appSettings, IHttpClientFactory httpClientFactory, ILogger<AdxHelper> logger)
+        public static HttpClient client = new HttpClient();
+        public AdxHelper(AppSettings appSettings, IHttpClientFactory httpClientFactory, ILogger<AdxHelper> logger)
         {
             _appSettings = appSettings;
             _httpClientFactory = httpClientFactory;
@@ -56,127 +58,72 @@ namespace MainClient.Common
         }
 
 
-        private readonly ConcurrentDictionary<int, TaskExposure> taskExposureById = new();
 
-        public TaskExposure GetOrAddTaskStatus(int taskid)
+        private List<JToken> ExtractTasks(JToken root)
         {
-            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(taskid);
-            return taskExposureById.GetOrAdd(taskid, static _ => new TaskExposure());
-        }
-        public TaskExposure UpdateTaskDsp(int taskid, int dsp = 1)
-        {
-            var exposure = GetOrAddTaskStatus(taskid);
-            exposure.AddExposures(dsp);
-            return exposure;
-        }
-        public TaskExposure UpdateTaskDspClick(int taskid, int click = 1)
-        {
-            var exposure = GetOrAddTaskStatus(taskid);
-            exposure.AddClicks(click);
-            return exposure;
-        }
+            var result = new List<JToken>();
+            if (root == null || root.Type == JTokenType.Null)
+                return result;
+            var task = root.SelectToken("task");
+            if (task == null)
+                return result;
 
-
-        #region 任务更新
-        /// <summary>
-        /// 更新总执行数量
-        /// </summary>
-        /// <param name="taskid"></param>
-        /// <returns></returns>
-        public async Task UpdateTaskStat()
-        {
-            await Task.CompletedTask;
-        }
-
-
-
-        /// <summary>
-        /// 更新总的点击数量
-        /// </summary>
-        /// <param name="taskid"></param>
-        /// <returns></returns>
-        public async Task<string> UpdateTaskClickNum(string taskid)
-        {
-            var client = _httpClientFactory.CreateClient();
-            HttpResponseMessage response = await client.GetAsync($"{_appSettings.Value.TaskApiUrl}?action=update-task-click-num&taskid={taskid}&_t={System.DateTime.Now.Ticks}");
-            response.EnsureSuccessStatusCode();
-            return await response.Content.ReadAsStringAsync();
-        }
-
-        /// <summary>
-        /// 更新字段及获取值
-        /// </summary>
-        /// <param name="taskid"></param>
-        /// <returns></returns>
-        public async Task<string> UpdateTaskStateNum(string taskid, string keys, string value = "1", string fields = "*")
-        {
-            try
+            foreach (var item in root.SelectToken("task")!)
             {
-                var client = _httpClientFactory.CreateClient();
-                HttpResponseMessage response = await client.GetAsync($"{_appSettings.Value.TaskApiUrl}?action=updateTaskstate&taskid={taskid}&keys={keys}&value={value}&fields={fields}&_t={System.DateTime.Now.Ticks}");
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsStringAsync();
+                result.Add(item);
             }
-            catch (Exception)
-            {
-                return null;
-            }
-
+            return result;
         }
 
-        #endregion
-
-
-
-
-
-        /// <summary>
-        ///短信通知
-        /// </summary>
-        /// <param name="name"></param>
-        /// <param name="phone"></param>
-        /// <returns></returns>
-        public async Task<string> SendSMS(string name, string phone)
+        public async Task<List<JToken>> GetTasksAsync(CancellationToken token = default)
         {
-            var client = _httpClientFactory.CreateClient();
-            try
+            var host = await IpHelper.GetLocalHostAsync();
+            var url = $"{_appSettings.TaskApiUrl}?type=1&test=0&action=getTask&task={_appSettings.TaskName}&host={System.Web.HttpUtility.UrlEncode(host)}&ver={AppConsts.AppVersion}&_t={DateTime.Now.Ticks}";
+
+            using (var request = new HttpRequestMessage(HttpMethod.Get, url))
+            using (var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token).ConfigureAwait(false))
             {
-                var formData = new FormUrlEncodedContent(new[] {
-                    new KeyValuePair<string, string>("name",name),
-                    new KeyValuePair<string, string>("phone", phone)
-                });
-                var response = await client.PostAsync("http://111.73.45.147/sendsms.php", formData);
                 response.EnsureSuccessStatusCode();
-                if (response.IsSuccessStatusCode)
+
+                var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+                if (string.IsNullOrWhiteSpace(json) || json.Equals("empty"))
+                    return new List<JToken>();
+
+                JToken root;
+
+                try
                 {
-                    var result = await response.Content.ReadAsStringAsync();
-
-                    return result;
+                    root = JToken.Parse(json);
                 }
-            }
-            catch (WebException ex)
-            {
-                Debug.WriteLine(ex.Message);
+                catch (JsonReaderException)
+                {
+                    return new List<JToken>();
+                }
 
+                return ExtractTasks(root);
             }
-            return null;
         }
 
-        static double CalculatePPI(double widthPixels, double heightPixels, double diagonalInches)
+        public async Task<JObject?> GetTaskStatusAsync(int taskId, CancellationToken token = default)
         {
-            if (diagonalInches <= 0)
-            {
-                throw new ArgumentException("对角线尺寸必须大于 0");
-            }
-            // 使用勾股定理计算像素对角线长度
-            double diagonalPixels = Math.Sqrt(Math.Pow(widthPixels, 2) + Math.Pow(heightPixels, 2));
-
-            // 计算 PPI
-            return diagonalPixels / diagonalInches;
+            return await Task.FromResult<JObject>(new JObject());
         }
 
+        public async Task<JObject?> UpdateTaskStateAsync(int taskId, Dictionary<string, long> metrics, CancellationToken token = default)
+        {
+            return await Task.FromResult<JObject>(new JObject());
+        }
+        public async Task<JObject?> UpdateHostStateAsync(Dictionary<string, long> metrics, CancellationToken token = default)
+        {
+            return await Task.FromResult<JObject>(new JObject());
+        }
 
-        //public static SemaphoreSlim _mutex = new SemaphoreSlim(System.Environment.ProcessorCount);
+        public async Task<JObject?> UpdateProxyIpStateAsync(int taskId, Dictionary<string, long> metrics, IEnumerable<string> ips, CancellationToken token = default)
+        {
+            return await Task.FromResult<JObject>(new JObject());
+        }
+
 
 
         /// <summary>
@@ -444,7 +391,7 @@ namespace MainClient.Common
         }
 
 
-        public async Task<JObject?> GetAdRequest(JObject task, JObject adParam, JObject dev, OSType os, string realIp, string proxy, JObject ipLocation, bool isProxyMode, CancellationToken token = default)
+        public async Task<JObject?> GetAdRequest(JToken task, JToken adParam, JObject dev, OSType os, string realIp, string proxy, JToken ipLocation, bool isProxyMode, CancellationToken token = default)
         {
             try
             {
@@ -463,7 +410,7 @@ namespace MainClient.Common
                 ad_device_info["sh"] = dev["sh"].Value<int>();
                 ad_device_info["client_ip"] = realIp;
 
- 
+
 
                 if (os == OSType.ANDROID)
                 {
@@ -578,7 +525,7 @@ namespace MainClient.Common
                 isProxyMode: isProxyMode,
                 proxyAddress: proxy);
 
-                if(result != null)
+                if (result != null)
                 {
                     result["request_id"] = request_id;
                 }

@@ -229,8 +229,8 @@ namespace CefClient
                 {
                     var task = _args.SelectToken("task")?.Value<JObject>()!;
                     var vast = _args.SelectToken("vast")?.Value<JObject>();
-                    int pv = task.SelectToken("pv")?.Value<int>() ?? 1;
-                    pv = pv == 0 ? 1 : pv;
+                    int totalPV = task.SelectToken("pv")?.Value<int>() ?? 1;
+                    totalPV = totalPV == 0 ? 1 : totalPV;
                     #region sleep
                     int sleep = 0;
                     if (task.ContainsKey("sleep") && !string.IsNullOrWhiteSpace(task["sleep"].ToString()))
@@ -319,7 +319,9 @@ namespace CefClient
                                 var ad_action = ad.SelectToken("ad_action.action")?.Value<string>() ?? "";
                                 //wnurl
                                 #region 竞胜反馈打点wnurl
+
                                 var wnurl = ad.SelectToken("wnurl")?.Value<string>();
+                                /*
                                 if (!string.IsNullOrWhiteSpace(wnurl))
                                 {
                                     var url = wnurl;
@@ -327,16 +329,19 @@ namespace CefClient
                                     await LoadPageAsync(browser, url);
                                     LogWriteLine($"竞胜反馈[{task["id"]}]:{url}");
                                 }
+                                */
                                 #endregion
 
-
-
                                 #region 广告展示监控
+
                                 var vurls = ad.SelectToken("vurl");
+
                                 if (vurls != null)
                                 {
+
                                     foreach (var vurl in vurls)
-                                    {
+                                    { 
+                                        /*
                                         try
                                         {
                                             var url = vurl.Value<string>();
@@ -349,12 +354,15 @@ namespace CefClient
                                         {
 
                                         }
+                                         */
                                     }
+
 
                                 }
                                 var end_vurl = ad.SelectToken("end_vurl");
                                 if (end_vurl != null)
                                 {
+                                    /*
                                     try
                                     {
                                         var url = end_vurl.Value<string>();
@@ -365,10 +373,11 @@ namespace CefClient
                                     {
 
                                     }
+                                    */
                                 }
                                 DspChanged();
                                 #endregion
-
+                             
                                 if (clickJump)
                                 {
                                     #region 广告点击监控
@@ -386,6 +395,7 @@ namespace CefClient
                                     {
                                         foreach (var curl in curls)
                                         {
+                                            /*
                                             try
                                             {
                                                 var url = curl.Value<string>();
@@ -397,6 +407,7 @@ namespace CefClient
                                             {
 
                                             }
+                                            */
                                         }
                                         DspClickChanged();
                                     }

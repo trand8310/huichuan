@@ -4,14 +4,13 @@ using Newtonsoft.Json.Linq;
 using System.Diagnostics;
 using System.Text;
 using Huichuan.Protocol;
+using System.Win32;
 
 
 namespace CefClient
 {
     public partial class MainForm : Form
     {
-
-        private SynchronizationContext sync;
         private int hMainWnd = 0;
         private bool isHiddenMode = true;
         private string clientId = string.Empty;
@@ -53,14 +52,14 @@ namespace CefClient
         private void SendTaskMsgHandler(string message)
         {
             byte[] sarr = Encoding.Default.GetBytes(message);
-            Win32.COPYDATASTRUCT cds;
+            COPYDATASTRUCT cds;
             cds.dwData = (IntPtr)CefProtocol.CopyDataId;
             cds.lpData = message;
             cds.cbData = sarr.Length + 1;
             const uint abortIfHung = 0x0002;
-            var sent = Win32.User.SendMessageTimeout(
+            var sent = Win32Api.SendMessageTimeout(
                 this.hMainWnd,
-                Win32.User.WM_COPYDATA,
+                Win32Api.WM_COPYDATA,
                 IntPtr.Zero,
                 ref cds,
                 abortIfHung,
@@ -165,7 +164,7 @@ namespace CefClient
 
         protected override void DefWndProc(ref System.Windows.Forms.Message m)
         {
-            if (m.Msg != Win32.User.WM_COPYDATA)
+            if (m.Msg != Win32Api.WM_COPYDATA)
             {
                 base.DefWndProc(ref m);
                 return;
@@ -173,7 +172,7 @@ namespace CefClient
 
             try
             {
-                var data = (Win32.COPYDATASTRUCT)m.GetLParam(typeof(Win32.COPYDATASTRUCT));
+                var data = (COPYDATASTRUCT)m.GetLParam(typeof(COPYDATASTRUCT));
                 if (data.dwData == (IntPtr)CefProtocol.CopyDataId &&
                     data.cbData > 1 &&
                     messageQueue.TryEnqueue(data.lpData))
@@ -192,7 +191,6 @@ namespace CefClient
                 ResolveMessage,
                 exception => Debug.WriteLine($"处理 WM_COPYDATA 失败: {exception}"));
             InitializeComponent();
-            this.sync = SynchronizationContext.Current;
             var commandLineArgs = System.Environment.GetCommandLineArgs();
             foreach (var c in commandLineArgs)
             {
