@@ -16,6 +16,7 @@ namespace CefClient
         private bool isHiddenMode = true;
         private string clientId = string.Empty;
         private int taskCount = 0;
+        private readonly CopyDataMessageQueue messageQueue;
 
 
         #region  LogWrite
@@ -57,14 +58,16 @@ namespace CefClient
             cds.lpData = message;
             cds.cbData = sarr.Length + 1;
             const uint abortIfHung = 0x0002;
-            Win32.User.SendMessageTimeout(
+            var sent = Win32.User.SendMessageTimeout(
                 this.hMainWnd,
                 Win32.User.WM_COPYDATA,
                 IntPtr.Zero,
                 ref cds,
                 abortIfHung,
                 5000,
-                out _);
+                out var handled);
+            if (sent == IntPtr.Zero || handled == IntPtr.Zero)
+                Debug.WriteLine($"向 MainClient 窗口 {hMainWnd} 发送消息失败、超时或被拒绝。");
         }
         private void OnTaskLogHandler(string message)
         {
@@ -103,8 +106,6 @@ namespace CefClient
 
         private void ResolveMessage(string value)
         {
-            Task.Run(() =>
-            {
                 if (!CefProtocol.TryParse(value, out var message, out var msgName))
                     return;
                 if (msgName.Equals(CefProtocol.Messages.Load, StringComparison.Ordinal))
@@ -153,8 +154,6 @@ namespace CefClient
                 {
                     this.isHiddenMode = true;
                 }
-            });
-
         }
 
         private async Task StopAsync()
@@ -166,26 +165,32 @@ namespace CefClient
 
         protected override void DefWndProc(ref System.Windows.Forms.Message m)
         {
-            switch (m.Msg)
+            if (m.Msg != Win32.User.WM_COPYDATA)
             {
-                case Win32.User.WM_COPYDATA:
-                    Win32.COPYDATASTRUCT data = new Win32.COPYDATASTRUCT();
-                    Type myType = data.GetType();
-                    data = (Win32.COPYDATASTRUCT)m.GetLParam(myType);
-                    var value = data.lpData;
-                    if (!string.IsNullOrWhiteSpace(value))
-                    {
-                        ResolveMessage(value);
-                    }
-                    break;
-                default:
-                    base.DefWndProc(ref m);
-                    break;
+                base.DefWndProc(ref m);
+                return;
+            }
+
+            try
+            {
+                var data = (Win32.COPYDATASTRUCT)m.GetLParam(typeof(Win32.COPYDATASTRUCT));
+                if (data.dwData == (IntPtr)CefProtocol.CopyDataId &&
+                    data.cbData > 1 &&
+                    messageQueue.TryEnqueue(data.lpData))
+                    m.Result = (IntPtr)1;
+            }
+            catch (Exception exception)
+            {
+                Debug.WriteLine($"接收 WM_COPYDATA 失败: {exception}");
+                m.Result = IntPtr.Zero;
             }
         }
 
         public MainForm()
         {
+            messageQueue = new CopyDataMessageQueue(
+                ResolveMessage,
+                exception => Debug.WriteLine($"处理 WM_COPYDATA 失败: {exception}"));
             InitializeComponent();
             this.sync = SynchronizationContext.Current;
             var commandLineArgs = System.Environment.GetCommandLineArgs();
@@ -209,6 +214,12 @@ namespace CefClient
             }
             SendRegMessage();
             LogWriteLine($"ProcessId={Process.GetCurrentProcess().Id},Handle={this.Handle},RootCachePath={CefCachePaths.RootCachePath},isHiddenMode={this.isHiddenMode}");
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            messageQueue.Dispose();
+            base.OnFormClosed(e);
         }
 
         protected override void SetVisibleCore(bool value)
