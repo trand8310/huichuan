@@ -26,9 +26,12 @@ namespace MainClient
     {
         private int MainFormHandle = 0;
         private CancellationTokenSource? cts;
+        private int _scheduledRestartIntervalMinutes = -1;
+        private int _restartStarted;
 
         private readonly ILogger _logger;
         private readonly AppSettings _appSettings;
+        private readonly AppLaunchOptions _launchOptions;
         private readonly DevHelper _devHelper;
         private readonly AdxHelper _adxHelper;
         private readonly IpHelper _ipHelper;
@@ -724,6 +727,8 @@ namespace MainClient
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            cts?.Cancel();
+            cts?.Dispose();
             messageQueue.Dispose();
             base.OnFormClosed(e);
         }
@@ -738,6 +743,7 @@ namespace MainClient
             IpHelper ipHelper,
             ProxyTester ipTester,
             AppSettings appSettings,
+            AppLaunchOptions launchOptions,
             ILogger<MainForm> logger)
         {
             InitializeComponent();
@@ -747,6 +753,7 @@ namespace MainClient
             _ipHelper = ipHelper;
             _ipTester = ipTester;
             _appSettings = appSettings;
+            _launchOptions = launchOptions;
             _logger = logger;
 
             messageQueue = new CopyDataMessageQueue(
@@ -785,11 +792,26 @@ namespace MainClient
                 }
             }
         }
-        private void MainForm_Load(object sender, EventArgs e)
+        private async void MainForm_Load(object sender, EventArgs e)
         {
             this.MainFormHandle = (int)this.Handle;
             StartLogConsumer();
             _logger.LogInformation("应用已启动");
+            ScheduleAutomaticRestart();
+
+            if (_launchOptions.AutoStartTasks)
+            {
+                try
+                {
+                    await _taskManager.StartAsync();
+                    _logger.LogInformation("应用由定时重启启动，任务调度已自动开始");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "定时重启后自动开始任务调度失败");
+                }
+            }
+
             Task.Run(() =>
             {
                 this.InvokeOnUiThreadIfRequired(() =>
@@ -921,6 +943,98 @@ namespace MainClient
             _appSettings.PersistAdx = checkBox_PersistAdx.Checked;
 
             UserConfigService.Save("AppSettings", _appSettings);
+            ScheduleAutomaticRestart();
+        }
+
+        private void ScheduleAutomaticRestart()
+        {
+            int intervalMinutes = _appSettings.MainProcessResetIntervalMinutes;
+            if (_scheduledRestartIntervalMinutes == intervalMinutes && cts is { IsCancellationRequested: false })
+                return;
+
+            cts?.Cancel();
+            cts?.Dispose();
+            cts = null;
+            _scheduledRestartIntervalMinutes = intervalMinutes;
+
+            if (intervalMinutes <= 0)
+            {
+                _logger.LogInformation("应用定时重启已禁用");
+                return;
+            }
+
+            cts = new CancellationTokenSource();
+            CancellationToken token = cts.Token;
+            _logger.LogInformation("应用将在 {IntervalMinutes} 分钟后自动重启", intervalMinutes);
+
+            _ = RestartAfterDelayAsync(intervalMinutes, token);
+        }
+
+        private async Task RestartAfterDelayAsync(int intervalMinutes, CancellationToken token)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMinutes(intervalMinutes), token);
+                Task restartTask = await this.UiInvokeAsync(RestartApplicationAsync);
+                await restartTask;
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                // 设置发生变化或程序正常退出时取消本次重启。
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "应用定时重启失败");
+            }
+        }
+
+        private async Task RestartApplicationAsync()
+        {
+            if (Interlocked.Exchange(ref _restartStarted, 1) != 0)
+                return;
+
+            _logger.LogInformation("已到达定时重启周期，正在停止任务并重启应用");
+
+            try
+            {
+                if (_taskManager.State is RunnerState.Running or RunnerState.Stopping)
+                {
+                    await _taskManager.StopAsync(new TaskDispatchStopOptions
+                    {
+                        Timeout = TimeSpan.FromSeconds(8),
+                        PersistPending = true
+                    });
+                }
+
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = Application.ExecutablePath,
+                    Arguments = AppLaunchOptions.AutoStartArgument,
+                    WorkingDirectory = AppContext.BaseDirectory,
+                    UseShellExecute = true
+                });
+                Application.Exit();
+            }
+            catch (Exception ex)
+            {
+                Interlocked.Exchange(ref _restartStarted, 0);
+                _logger.LogError(ex, "启动新的 MainClient 进程失败，当前进程将继续运行");
+
+                if (_taskManager.State is RunnerState.Stopped or RunnerState.Faulted)
+                {
+                    try
+                    {
+                        await _taskManager.StartAsync();
+                    }
+                    catch (Exception startException)
+                    {
+                        _logger.LogError(startException, "重启失败后恢复任务调度失败");
+                    }
+                }
+
+                _scheduledRestartIntervalMinutes = -1;
+                ScheduleAutomaticRestart();
+            }
         }
         #endregion
 

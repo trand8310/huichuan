@@ -19,9 +19,13 @@ namespace MainClient
         /// 应用程序的主入口点。
         /// </summary>
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
-
+            var launchOptions = new AppLaunchOptions
+            {
+                AutoStartTasks = args.Any(argument =>
+                    string.Equals(argument, AppLaunchOptions.AutoStartArgument, StringComparison.OrdinalIgnoreCase))
+            };
             var appSettings = new AppSettings();
             UserConfigService.Init(appSettings);
             var configuration = new ConfigurationBuilder()
@@ -43,6 +47,7 @@ namespace MainClient
                 {
                     services.AddHttpClient();
                     services.AddSingleton(appSettings);
+                    services.AddSingleton(launchOptions);
                     services.AddSingleton<TaskMetricsService>();
                     services.AddSingleton<ProxyTester>();
                     services.AddSingleton<AdxHelper>();
