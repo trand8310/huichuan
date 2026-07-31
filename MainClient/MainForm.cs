@@ -1011,7 +1011,7 @@ namespace MainClient
             int TaskId,
             string Title,
             int TotalUv,
-            int ClickRate,
+            double ClickRate,
             string DeviceClientId,
             string Url,
             JToken AdParam,
@@ -1560,10 +1560,16 @@ namespace MainClient
                     .Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .FirstOrDefault() ?? string.Empty;
 
-                var clickRate = Math.Clamp(
-                    task.Value<int?>("click_rate") ?? 0,
-                    0,
-                    100);
+                // Keep the fractional part: parsing as int silently reduced the
+                // configurable CTR resolution to whole percentage points.
+                var rawClickRate = task.Value<double?>("click_rate") ?? 0d;
+                if (!double.IsFinite(rawClickRate))
+                {
+                    error = "click_rate 必须是有限数值";
+                    return false;
+                }
+
+                var clickRate = Math.Clamp(rawClickRate, 0d, 100d);
 
                 parsed = new ParsedTask(
                     taskId.Value,
