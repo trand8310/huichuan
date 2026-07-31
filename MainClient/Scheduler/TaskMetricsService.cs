@@ -97,6 +97,8 @@ namespace MainClient.Scheduler
         private readonly ConcurrentDictionary<TaskHourKey, TrafficTaskStateEntity> _taskGlobalBaseline = new();
         private readonly ConcurrentDictionary<TaskHourKey, double> _taskClickRates = new();
         private readonly ConcurrentDictionary<TaskHourKey, SemaphoreSlim> _baselineInitLocks = new();
+        private readonly ConcurrentDictionary<TaskHourKey, ClickRatioPlanner> _clickRatioPlanners = new();
+        private readonly ConcurrentDictionary<TaskHourKey, SemaphoreSlim> _clickRatioPlannerLocks = new();
 
         private readonly AdxHelper _adxHelper;
         private readonly AppSettings _appSettings;
@@ -374,20 +376,24 @@ namespace MainClient.Scheduler
 
             var key = GetClickHourKey(taskId);
             var baseline = _taskGlobalBaseline[key];
-            var stats = _taskStates.GetOrAdd(taskId, _ => new TrafficTaskStateEntity());
             var rate = _taskClickRates.TryGetValue(key, out var r) ? r : taskCtr;
+            var gate = _clickRatioPlannerLocks.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
 
-            if (rate <= 0)
-                return false;
-
-            long totalDsp = baseline.DSP + stats.DSP;
-            if (totalDsp <= 0)
-                return true;
-
-            long totalClick = baseline.Clickthrough + stats.Clickthrough;
-            long targetClick = (long)Math.Floor(totalDsp * rate * 0.01);
-
-            return totalClick < targetClick;
+            // The old read/compare implementation allowed every concurrent caller
+            // to observe the same counters and all choose "click". Reserve the next
+            // position while holding a per-task/per-hour lock instead.
+            await gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var planner = _clickRatioPlanners.GetOrAdd(
+                    key,
+                    _ => new ClickRatioPlanner(baseline.DSP, baseline.Clickthrough));
+                return planner.PlanNext(rate);
+            }
+            finally
+            {
+                gate.Release();
+            }
         }
 
 
