@@ -1,17 +1,9 @@
-﻿using MainClient.Common;
-using MainClient.Win32;
-using System;
-using System.Collections.Generic;
+﻿using MainClient.Win32;
 using System.Diagnostics;
-using System.Drawing;
 using System.Drawing.Imaging;
-using System.IO;
-using System.Linq;
 using System.Net;
-using System.Net.Http;
 using System.Security.Cryptography;
 using System.Text;
-using System.Threading.Tasks;
 
 namespace MainClient.Common
 {

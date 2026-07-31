@@ -2,7 +2,6 @@
 using CefSharp;
 using CefSharp.WinForms;
 using System.Diagnostics;
-using System.Text;
 using Huichuan.Protocol;
 
 namespace CefClient
