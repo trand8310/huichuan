@@ -321,7 +321,6 @@ namespace CefClient
                                 #region 竞胜反馈打点wnurl
 
                                 var wnurl = ad.SelectToken("wnurl")?.Value<string>();
-                                /*
                                 if (!string.IsNullOrWhiteSpace(wnurl))
                                 {
                                     var url = wnurl;
@@ -329,7 +328,7 @@ namespace CefClient
                                     await LoadPageAsync(browser, url);
                                     LogWriteLine($"竞胜反馈[{task["id"]}]:{url}");
                                 }
-                                */
+
                                 #endregion
 
                                 #region 广告展示监控
@@ -340,8 +339,8 @@ namespace CefClient
                                 {
 
                                     foreach (var vurl in vurls)
-                                    { 
-                                        /*
+                                    {
+
                                         try
                                         {
                                             var url = vurl.Value<string>();
@@ -354,15 +353,15 @@ namespace CefClient
                                         {
 
                                         }
-                                         */
+
                                     }
 
 
                                 }
+
                                 var end_vurl = ad.SelectToken("end_vurl");
                                 if (end_vurl != null)
                                 {
-                                    /*
                                     try
                                     {
                                         var url = end_vurl.Value<string>();
@@ -373,11 +372,11 @@ namespace CefClient
                                     {
 
                                     }
-                                    */
                                 }
+
                                 DspChanged();
                                 #endregion
-                             
+
                                 if (clickJump)
                                 {
                                     #region 广告点击监控
@@ -395,7 +394,7 @@ namespace CefClient
                                     {
                                         foreach (var curl in curls)
                                         {
-                                            /*
+
                                             try
                                             {
                                                 var url = curl.Value<string>();
@@ -407,7 +406,7 @@ namespace CefClient
                                             {
 
                                             }
-                                            */
+
                                         }
                                         DspClickChanged();
                                     }

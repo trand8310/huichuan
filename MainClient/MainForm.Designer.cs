@@ -53,7 +53,7 @@
             label18 = new Label();
             numericUpDown_SubResetTimeout = new NumericUpDown();
             label17 = new Label();
-            numericUpDown_MainResetTimeout = new NumericUpDown();
+            numericUpDown_MainProcessResetIntervalMinutes = new NumericUpDown();
             label26 = new Label();
             checkBox_IsProxyMode = new CheckBox();
             checkBox_IsHiddenMode = new CheckBox();
@@ -104,7 +104,7 @@
             ((System.ComponentModel.ISupportInitialize)numericUpDown_DspBidPrice).BeginInit();
             ((System.ComponentModel.ISupportInitialize)numericUpDown_PageLoadingTimeout).BeginInit();
             ((System.ComponentModel.ISupportInitialize)numericUpDown_SubResetTimeout).BeginInit();
-            ((System.ComponentModel.ISupportInitialize)numericUpDown_MainResetTimeout).BeginInit();
+            ((System.ComponentModel.ISupportInitialize)numericUpDown_MainProcessResetIntervalMinutes).BeginInit();
             groupBox5.SuspendLayout();
             ((System.ComponentModel.ISupportInitialize)numericUpDown_SendSmsTimeout).BeginInit();
             ((System.ComponentModel.ISupportInitialize)numericUpDown_Multiple).BeginInit();
@@ -141,7 +141,7 @@
             groupBox2.Controls.Add(label18);
             groupBox2.Controls.Add(numericUpDown_SubResetTimeout);
             groupBox2.Controls.Add(label17);
-            groupBox2.Controls.Add(numericUpDown_MainResetTimeout);
+            groupBox2.Controls.Add(numericUpDown_MainProcessResetIntervalMinutes);
             groupBox2.Controls.Add(label26);
             groupBox2.Controls.Add(checkBox_IsProxyMode);
             groupBox2.Controls.Add(checkBox_IsHiddenMode);
@@ -418,14 +418,14 @@
             label17.TabIndex = 62;
             label17.Text = "子进程重置:";
             // 
-            // numericUpDown_MainResetTimeout
+            // numericUpDown_MainProcessResetIntervalMinutes
             // 
-            numericUpDown_MainResetTimeout.Location = new Point(395, 187);
-            numericUpDown_MainResetTimeout.Margin = new Padding(5, 4, 5, 4);
-            numericUpDown_MainResetTimeout.Maximum = new decimal(new int[] { 1440, 0, 0, 0 });
-            numericUpDown_MainResetTimeout.Name = "numericUpDown_MainResetTimeout";
-            numericUpDown_MainResetTimeout.Size = new Size(87, 27);
-            numericUpDown_MainResetTimeout.TabIndex = 61;
+            numericUpDown_MainProcessResetIntervalMinutes.Location = new Point(395, 187);
+            numericUpDown_MainProcessResetIntervalMinutes.Margin = new Padding(5, 4, 5, 4);
+            numericUpDown_MainProcessResetIntervalMinutes.Maximum = new decimal(new int[] { 1440, 0, 0, 0 });
+            numericUpDown_MainProcessResetIntervalMinutes.Name = "numericUpDown_MainProcessResetIntervalMinutes";
+            numericUpDown_MainProcessResetIntervalMinutes.Size = new Size(87, 27);
+            numericUpDown_MainProcessResetIntervalMinutes.TabIndex = 61;
             // 
             // label26
             // 
@@ -894,7 +894,7 @@
             ((System.ComponentModel.ISupportInitialize)numericUpDown_DspBidPrice).EndInit();
             ((System.ComponentModel.ISupportInitialize)numericUpDown_PageLoadingTimeout).EndInit();
             ((System.ComponentModel.ISupportInitialize)numericUpDown_SubResetTimeout).EndInit();
-            ((System.ComponentModel.ISupportInitialize)numericUpDown_MainResetTimeout).EndInit();
+            ((System.ComponentModel.ISupportInitialize)numericUpDown_MainProcessResetIntervalMinutes).EndInit();
             groupBox5.ResumeLayout(false);
             groupBox5.PerformLayout();
             ((System.ComponentModel.ISupportInitialize)numericUpDown_SendSmsTimeout).EndInit();
@@ -951,7 +951,7 @@
         private System.Windows.Forms.Label label18;
         private System.Windows.Forms.NumericUpDown numericUpDown_SubResetTimeout;
         private System.Windows.Forms.Label label17;
-        private System.Windows.Forms.NumericUpDown numericUpDown_MainResetTimeout;
+        private System.Windows.Forms.NumericUpDown numericUpDown_MainProcessResetIntervalMinutes;
         private System.Windows.Forms.Label label26;
         private RadioButton radioButton_UseLocalDev;
         private TextBox textBox_DevApiUrl;

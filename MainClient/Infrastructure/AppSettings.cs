@@ -37,7 +37,10 @@ namespace MainClient.Infrastructure
         public bool IsCheckIp { get; set; }
         public int Multiple { get; set; }
         public bool RealIp { get; set; }
-        public int MainResetTimeout { get; set; }
+        /// <summary>
+        /// 主进程重置
+        /// </summary>
+        public int MainProcessResetIntervalMinutes { get; set; }
         public int SubResetTimeout { get; set; }
         public bool SendSms { get; set; }
         public string SmsName { get; set; }

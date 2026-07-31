@@ -858,7 +858,7 @@ namespace MainClient
             numericUpDown_PageLoadingTimeout.Value = _appSettings.PageLoadTimeout;
             textBox_TaskName.Text = _appSettings.TaskName;
             numericUpDown_Multiple.Value = _appSettings.Multiple;
-            numericUpDown_MainResetTimeout.Value = _appSettings.MainResetTimeout;
+            numericUpDown_MainProcessResetIntervalMinutes.Value = _appSettings.MainProcessResetIntervalMinutes;
             numericUpDown_SubResetTimeout.Value = _appSettings.SubResetTimeout;
             checkBox_IsHiddenMode.Checked = _appSettings.IsHiddenMode;
             checkBox_IsProxyMode.Checked = _appSettings.IsProxyMode;
@@ -895,7 +895,7 @@ namespace MainClient
             _appSettings.PageLoadTimeout = (int)numericUpDown_PageLoadingTimeout.Value;
             _appSettings.TaskName = textBox_TaskName.Text;
             _appSettings.Multiple = (int)numericUpDown_Multiple.Value;
-            _appSettings.MainResetTimeout = (int)numericUpDown_MainResetTimeout.Value;
+            _appSettings.MainProcessResetIntervalMinutes = (int)numericUpDown_MainProcessResetIntervalMinutes.Value;
             _appSettings.SubResetTimeout = (int)numericUpDown_SubResetTimeout.Value;
             _appSettings.IsHiddenMode = checkBox_IsHiddenMode.Checked;
             _appSettings.IsProxyMode = checkBox_IsProxyMode.Checked;
@@ -1320,16 +1320,16 @@ namespace MainClient
                     _aggregator.EnqueueTaskState(new TrafficTaskStateEvent(parsed.TaskId, TrafficTaskStateKind.Request, 1));
 
 
-                    //adx = await _adxHelper.GetAdRequest(
-                    //    parsed.RawTask,
-                    //    parsed.AdParam,
-                    //    dev,
-                    //    os,
-                    //    network.RealIp,
-                    //    network.ProxyServer,
-                    //    network.IpInfo,
-                    //    _appSettings.IsProxyMode);
-                    adx = JObject.Parse(Resources.adx_json);
+                    adx = await _adxHelper.GetAdRequest(
+                        parsed.RawTask,
+                        parsed.AdParam,
+                        dev,
+                        os,
+                        network.RealIp,
+                        network.ProxyServer,
+                        network.IpInfo,
+                        _appSettings.IsProxyMode);
+                   // adx = JObject.Parse(Resources.adx_json);
 
 
                 }

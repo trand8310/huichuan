@@ -27,38 +27,6 @@ namespace MainClient.Common
         }
 
 
-        /// <summary>
-        /// 获取任务
-        /// </summary>
-        /// <param name="address"></param>
-        /// <returns></returns>
-        public async Task<string?> GetTaskAsync(
-            string address,
-            CancellationToken cancellationToken = default)
-        {
-            var client = _httpClientFactory.CreateClient();
-            try
-            {
-                client.Timeout = TimeSpan.FromSeconds(10);
-                client.DefaultRequestHeaders.Accept.Clear();
-                client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                using HttpResponseMessage response = await client.GetAsync(address, cancellationToken);
-                response.EnsureSuccessStatusCode();
-                return await response.Content.ReadAsStringAsync(cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "获取任务失败：{Address}", address);
-            }
-            return null;
-        }
-
-
-
         private List<JToken> ExtractTasks(JToken root)
         {
             var result = new List<JToken>();
