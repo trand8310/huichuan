@@ -89,14 +89,47 @@ namespace MainClient.Scheduler
         private readonly ConcurrentDictionary<int, TrafficProxyIpStateEntity> _proxyIpStates = new();
         private readonly TrafficTaskStateEntity _hostTaskStates = new();
         public readonly record struct TaskHourKey(int TaskId, string HourKey);
-        private static TaskHourKey GetClickHourKey(int taskId)
+        private readonly object _clickHourRolloverSync = new();
+        private string _activeClickHour = GetHourKey();
+
+        private TaskHourKey GetClickHourKey(int taskId)
         {
-            return new TaskHourKey(taskId, GetHourKey());
+            var hourKey = GetHourKey();
+            if (!string.Equals(Volatile.Read(ref _activeClickHour), hourKey, StringComparison.Ordinal))
+            {
+                lock (_clickHourRolloverSync)
+                {
+                    if (!string.Equals(_activeClickHour, hourKey, StringComparison.Ordinal))
+                    {
+                        // A new hour is a new control period. Old entries must not
+                        // influence it and retaining them would grow one set per hour.
+                        RemoveOtherHours(_taskGlobalBaseline, hourKey);
+                        RemoveOtherHours(_taskClickRates, hourKey);
+                        RemoveOtherHours(_baselineInitLocks, hourKey);
+                        RemoveOtherHours(_clickRatioPlanners, hourKey);
+                        Volatile.Write(ref _activeClickHour, hourKey);
+                    }
+                }
+            }
+
+            return new TaskHourKey(taskId, hourKey);
+        }
+
+        private static void RemoveOtherHours<T>(
+            ConcurrentDictionary<TaskHourKey, T> values,
+            string currentHour)
+        {
+            foreach (var key in values.Keys)
+            {
+                if (!string.Equals(key.HourKey, currentHour, StringComparison.Ordinal))
+                    values.TryRemove(key, out _);
+            }
         }
 
         private readonly ConcurrentDictionary<TaskHourKey, TrafficTaskStateEntity> _taskGlobalBaseline = new();
         private readonly ConcurrentDictionary<TaskHourKey, double> _taskClickRates = new();
         private readonly ConcurrentDictionary<TaskHourKey, SemaphoreSlim> _baselineInitLocks = new();
+        private readonly ConcurrentDictionary<TaskHourKey, ClickRatioPlanner> _clickRatioPlanners = new();
 
         private readonly AdxHelper _adxHelper;
         private readonly AppSettings _appSettings;
@@ -354,9 +387,8 @@ namespace MainClient.Scheduler
 
         public async Task<double> GetClickRatioAsync(int taskId, double taskCtr = 100)
         {
-            await EnsureTaskBaselineAsync(taskId, taskCtr).ConfigureAwait(false);
-
             var key = GetClickHourKey(taskId);
+            await EnsureTaskBaselineAsync(key, taskCtr).ConfigureAwait(false);
             var baseline = _taskGlobalBaseline[key];
             var stats = _taskStates.GetOrAdd(taskId, _ => new TrafficTaskStateEntity());
 
@@ -370,24 +402,18 @@ namespace MainClient.Scheduler
 
         public async Task<bool> CanClickthroughAsync(int taskId, double taskCtr = 100)
         {
-            await EnsureTaskBaselineAsync(taskId, taskCtr).ConfigureAwait(false);
-
             var key = GetClickHourKey(taskId);
+            await EnsureTaskBaselineAsync(key, taskCtr).ConfigureAwait(false);
             var baseline = _taskGlobalBaseline[key];
-            var stats = _taskStates.GetOrAdd(taskId, _ => new TrafficTaskStateEntity());
             var rate = _taskClickRates.TryGetValue(key, out var r) ? r : taskCtr;
 
-            if (rate <= 0)
-                return false;
-
-            long totalDsp = baseline.DSP + stats.DSP;
-            if (totalDsp <= 0)
-                return true;
-
-            long totalClick = baseline.Clickthrough + stats.Clickthrough;
-            long targetClick = (long)Math.Floor(totalDsp * rate * 0.01);
-
-            return totalClick < targetClick;
+            // All processIndex/UV producers in this MainClient share this singleton
+            // service and therefore the same planner for a task/hour. PlanNext is
+            // atomic, so concurrent calls reserve distinct global stream positions.
+            var planner = _clickRatioPlanners.GetOrAdd(
+                key,
+                _ => new ClickRatioPlanner(baseline.DSP, baseline.Clickthrough));
+            return planner.PlanNext(rate);
         }
 
 
@@ -698,10 +724,8 @@ namespace MainClient.Scheduler
 
         #region Baseline Init
 
-        private async Task EnsureTaskBaselineAsync(int taskId, double taskCtr)
+        private async Task EnsureTaskBaselineAsync(TaskHourKey key, double taskCtr)
         {
-            var key = GetClickHourKey(taskId);
-
             if (_taskGlobalBaseline.ContainsKey(key))
             {
                 _taskClickRates[key] = taskCtr;
@@ -719,7 +743,7 @@ namespace MainClient.Scheduler
                     return;
                 }
 
-                var resp = await _adxHelper.GetTaskStatusAsync(taskId).ConfigureAwait(false);
+                var resp = await _adxHelper.GetTaskStatusAsync(key.TaskId).ConfigureAwait(false);
 
                 var globalStats = new TrafficTaskStateEntity();
                 if (resp != null)
