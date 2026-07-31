@@ -56,23 +56,24 @@ namespace MainClient.Common
         }
 
 
-        private ConcurrentDictionary<int, TaskStatItem> task_stat_dict = new ConcurrentDictionary<int, TaskStatItem>();
+        private readonly ConcurrentDictionary<int, TaskExposure> taskExposureById = new();
 
-        public TaskStatItem GetOrAddTaskStatus(int taskid)
+        public TaskExposure GetOrAddTaskStatus(int taskid)
         {
-            return task_stat_dict.GetOrAdd(taskid, new TaskStatItem());
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(taskid);
+            return taskExposureById.GetOrAdd(taskid, static _ => new TaskExposure());
         }
-        public TaskStatItem UpdateTaskAll(int taskid, int all = 1)
+        public TaskExposure UpdateTaskDsp(int taskid, int dsp = 1)
         {
-            return task_stat_dict.AddOrUpdate(taskid, new TaskStatItem(), (k, v) => v.AddAllCount(all));
+            var exposure = GetOrAddTaskStatus(taskid);
+            exposure.AddExposures(dsp);
+            return exposure;
         }
-        public TaskStatItem UpdateTaskDsp(int taskid, int dsp = 1)
+        public TaskExposure UpdateTaskDspClick(int taskid, int click = 1)
         {
-            return task_stat_dict.AddOrUpdate(taskid, new TaskStatItem(), (k, v) => v.AddDspCount(dsp));
-        }
-        public TaskStatItem UpdateTaskDspClick(int taskid, int click = 1)
-        {
-            return task_stat_dict.AddOrUpdate(taskid, new TaskStatItem(0), (k, v) => v.AddDspClick(click));
+            var exposure = GetOrAddTaskStatus(taskid);
+            exposure.AddClicks(click);
+            return exposure;
         }
 
 
@@ -598,47 +599,4 @@ namespace MainClient.Common
 
     }
 
-    public class TaskStatItem
-    {
-        public TaskStatItem(int all = 0, int dsp = 0, int click = 0, int pending = 0)
-        {
-            allCount = all;
-            dspCount = dsp;
-            dspClick = click;
-            pendingClick = pending;
-            adxCount = 0;
-
-        }
-        public int allCount;
-        public int adxCount;
-        public int dspCount;
-        public int dspClick;
-        public int pendingClick;
-
-        public TaskStatItem AddAllCount(int value)
-        {
-            Interlocked.Add(ref allCount, value);
-            return this;
-        }
-        public TaskStatItem AddAdxCount(int value)
-        {
-            Interlocked.Add(ref adxCount, value);
-            return this;
-        }
-        public TaskStatItem AddDspCount(int value)
-        {
-            Interlocked.Add(ref dspCount, value);
-            return this;
-        }
-        public TaskStatItem AddDspClick(int value)
-        {
-            Interlocked.Add(ref dspClick, value);
-            return this;
-        }
-        public TaskStatItem AddPendingClick(int value)
-        {
-            Interlocked.Add(ref pendingClick, value);
-            return this;
-        }
-    }
 }

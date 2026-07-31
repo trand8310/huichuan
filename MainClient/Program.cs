@@ -3,8 +3,11 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Newtonsoft.Json;
 using Serilog;
 using Serilog.Events;
+using System.Configuration;
+using System.Diagnostics;
 
 namespace MainClient
 {
@@ -71,7 +74,7 @@ namespace MainClient
             }
         }
 
-        private static Microsoft.Extensions.Logging.ILogger CreateProgramLogger(IHost host) =>
+        private static ILogger CreateProgramLogger(IHost host) =>
             host.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Program");
     }
 }
