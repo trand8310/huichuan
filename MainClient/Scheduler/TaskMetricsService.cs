@@ -446,7 +446,10 @@ namespace MainClient.Scheduler
                     key,
                     Math.Max(baseline.DSP, persisted.Dsp),
                     Math.Max(baseline.Clickthrough, persisted.Clickthrough));
-                return planner.PlanNext(rate);
+                return planner.PlanNext(
+                    rate,
+                    Math.Max(baseline.DSP, persisted.Dsp),
+                    Math.Max(baseline.Clickthrough, persisted.Clickthrough));
             }
             finally
             {

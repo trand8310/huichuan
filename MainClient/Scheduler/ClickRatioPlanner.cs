@@ -17,7 +17,7 @@ namespace MainClient.Scheduler
             _plannedClicks = Math.Max(0, existingClicks);
         }
 
-        public bool PlanNext(double percentage)
+        public bool PlanNext(double percentage, long confirmedDsp, long confirmedClicks)
         {
             if (!double.IsFinite(percentage))
             {
@@ -25,6 +25,27 @@ namespace MainClient.Scheduler
             }
 
             var rate = Math.Clamp(percentage, 0d, 100d);
+            confirmedDsp = Math.Max(0, confirmedDsp);
+            confirmedClicks = Math.Max(0, confirmedClicks);
+
+            var confirmedTarget = (long)decimal.Floor(
+                confirmedDsp * (decimal)rate / 100m + 0.5m);
+
+            // Browser confirmations can arrive after a decision, and a restarted
+            // client can restore a CTR already above target. In that case planned
+            // reservations must not issue another click: follow confirmed traffic
+            // until impressions have brought the real CTR back to the target.
+            if (confirmedClicks > confirmedTarget)
+            {
+                _plannedDsp = confirmedDsp + 1;
+                _plannedClicks = confirmedClicks;
+                return false;
+            }
+
+            // Incorporate confirmations that arrived since the planner was created,
+            // while retaining in-flight reservations to prevent concurrent bursts.
+            _plannedDsp = Math.Max(_plannedDsp, confirmedDsp);
+            _plannedClicks = Math.Max(_plannedClicks, confirmedClicks);
             _plannedDsp++;
 
             // decimal avoids the boundary errors produced by binary floating point.
