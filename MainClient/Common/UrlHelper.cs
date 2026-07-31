@@ -17,7 +17,6 @@ namespace MainClient.Common
 
     public class UrlHelper
     {
-        //private static readonly log4net.ILog logger = log4net.LogManager.GetLogger("URLLogging");
 
         /// <summary>
         /// 秒针URL处理
