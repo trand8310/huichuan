@@ -35,6 +35,7 @@ namespace MainClient
         private bool isRestart = false;
         private bool isRunning = false;
         private Stopwatch sw = new Stopwatch();
+        private readonly CopyDataMessageQueue messageQueue;
 
         #region 任务计数属性
         /// <summary>
@@ -217,29 +218,39 @@ namespace MainClient
                 ref cds,
                 abortIfHung,
                 5000,
-                out _);
-            if (sent == IntPtr.Zero)
-                throw new TimeoutException($"向 CefClient 窗口 {consumer.ClientWindowHandle} 发送消息失败或超时。");
+                out var handled);
+            if (sent == IntPtr.Zero || handled == IntPtr.Zero)
+                throw new TimeoutException($"向 CefClient 窗口 {consumer.ClientWindowHandle} 发送消息失败、超时或被拒绝。");
         }
 
 
         protected override void DefWndProc(ref System.Windows.Forms.Message m)
         {
-            switch (m.Msg)
+            if (m.Msg != NativeMethod.WM_COPYDATA)
             {
-                case NativeMethod.WM_COPYDATA:
-                    COPYDATASTRUCT data = new COPYDATASTRUCT();
-                    Type myType = data.GetType();
-                    data = (COPYDATASTRUCT)m.GetLParam(myType);
-                    if (!string.IsNullOrWhiteSpace(data.lpData))
-                    {
-                        Task.Run(() => ResolveMessage(data.lpData));
-                    }
-                    break;
-                default:
-                    base.DefWndProc(ref m);
-                    break;
+                base.DefWndProc(ref m);
+                return;
             }
+
+            try
+            {
+                var data = (COPYDATASTRUCT)m.GetLParam(typeof(COPYDATASTRUCT));
+                if (data.dwData == (IntPtr)CefProtocol.CopyDataId &&
+                    data.cbData > 1 &&
+                    messageQueue.TryEnqueue(data.lpData))
+                    m.Result = (IntPtr)1;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "接收 WM_COPYDATA 失败");
+                m.Result = IntPtr.Zero;
+            }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            messageQueue.Dispose();
+            base.OnFormClosed(e);
         }
         #endregion
 
@@ -253,13 +264,17 @@ namespace MainClient
             IWritableOptions<AppSettings> appSettings,
             ILogger<MainForm> logger)
         {
-            InitializeComponent();
             this._devHelper = devHelper;
             this._adxHelper = adxHelper;
             this._ipHelper = ipHelper;
             this._ipTester = ipTester;
             this._appSettings = appSettings;
             this._logger = logger;
+            messageQueue = new CopyDataMessageQueue(
+                ResolveMessage,
+                exception => _logger.LogError(exception, "处理 WM_COPYDATA 失败"),
+                Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
+            InitializeComponent();
             FormClosing += MainForm_FormClosing;
             this.Text += $"{AppConsts.AppVertion}";
             this.sync = SynchronizationContext.Current;

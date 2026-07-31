@@ -26,6 +26,7 @@
 
   <ItemGroup>
     <Compile Include="..\Shared\CefProtocol.cs" Link="Protocol\CefProtocol.cs" />
+    <Compile Include="..\Shared\CopyDataMessageQueue.cs" Link="Protocol\CopyDataMessageQueue.cs" />
   </ItemGroup>
 
   <ItemGroup>
