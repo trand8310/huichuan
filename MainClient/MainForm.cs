@@ -35,50 +35,8 @@ namespace MainClient
         private bool isRestart = false;
         private bool isRunning = false;
         private Stopwatch sw = new Stopwatch();
-
-        #region 任务计数属性
-        /// <summary>
-        /// 任务数量:
-        /// </summary>
-        private int GetTaskCount = 0;
-        /// <summary>
-        /// 任务总量
-        /// </summary>
-        private int TotalGetTaskCount = 0;
-        /// <summary>
-        /// 请求数量
-        /// </summary>
-        private int RequestCount = 0;
-        /// <summary>
-        /// 请求总量
-        /// </summary>
-        private int TotalRequestCount = 0;
-        /// <summary>
-        /// 提交数量
-        /// </summary>
-        private int SuccessCount = 0;
-        /// <summary>
-        /// 提交总量
-        /// </summary>
-        private int TotalSuccessCount = 0;
-        /// <summary>
-        /// 曝光次数
-        /// </summary>
-        private int DspCount = 0;
-        /// <summary>
-        /// 曝光总量
-        /// </summary>
-        private int TotalDspCount = 0;
-
-        /// <summary>
-        /// 点击次数
-        /// </summary>
-        private int DspClickCount = 0;
-        /// <summary>
-        /// 点击总量
-        /// </summary>
-        private int TotalDspClickCount = 0;
-        #endregion
+        private readonly CopyDataMessageQueue messageQueue;
+        private readonly LocalTaskStatistics statistics;
 
         #region  LogWrite
 
@@ -181,14 +139,12 @@ namespace MainClient
                 if (message.SelectToken("Data.Type").Value<int>() == 2)
                 {
                     _adxHelper.UpdateTaskDspClick(taskId, 1);
-                    Interlocked.Increment(ref this.TotalDspClickCount);
-                    Interlocked.Increment(ref this.DspClickCount);
+                    statistics.Increment(TaskStatisticNames.Clicks);
                 }
                 else
                 {
                     _adxHelper.UpdateTaskDsp(taskId, 1);
-                    Interlocked.Increment(ref this.DspCount);
-                    Interlocked.Increment(ref this.TotalDspCount);
+                    statistics.Increment(TaskStatisticNames.Exposures);
                 }
             }
             else if (msgName.Equals(CefProtocol.Messages.TaskLog, StringComparison.Ordinal))
@@ -217,29 +173,39 @@ namespace MainClient
                 ref cds,
                 abortIfHung,
                 5000,
-                out _);
-            if (sent == IntPtr.Zero)
-                throw new TimeoutException($"向 CefClient 窗口 {consumer.ClientWindowHandle} 发送消息失败或超时。");
+                out var handled);
+            if (sent == IntPtr.Zero || handled == IntPtr.Zero)
+                throw new TimeoutException($"向 CefClient 窗口 {consumer.ClientWindowHandle} 发送消息失败、超时或被拒绝。");
         }
 
 
         protected override void DefWndProc(ref System.Windows.Forms.Message m)
         {
-            switch (m.Msg)
+            if (m.Msg != NativeMethod.WM_COPYDATA)
             {
-                case NativeMethod.WM_COPYDATA:
-                    COPYDATASTRUCT data = new COPYDATASTRUCT();
-                    Type myType = data.GetType();
-                    data = (COPYDATASTRUCT)m.GetLParam(myType);
-                    if (!string.IsNullOrWhiteSpace(data.lpData))
-                    {
-                        Task.Run(() => ResolveMessage(data.lpData));
-                    }
-                    break;
-                default:
-                    base.DefWndProc(ref m);
-                    break;
+                base.DefWndProc(ref m);
+                return;
             }
+
+            try
+            {
+                var data = (COPYDATASTRUCT)m.GetLParam(typeof(COPYDATASTRUCT));
+                if (data.dwData == (IntPtr)CefProtocol.CopyDataId &&
+                    data.cbData > 1 &&
+                    messageQueue.TryEnqueue(data.lpData))
+                    m.Result = (IntPtr)1;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogError(exception, "接收 WM_COPYDATA 失败");
+                m.Result = IntPtr.Zero;
+            }
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            messageQueue.Dispose();
+            base.OnFormClosed(e);
         }
         #endregion
 
@@ -253,13 +219,22 @@ namespace MainClient
             IWritableOptions<AppSettings> appSettings,
             ILogger<MainForm> logger)
         {
-            InitializeComponent();
             this._devHelper = devHelper;
             this._adxHelper = adxHelper;
             this._ipHelper = ipHelper;
             this._ipTester = ipTester;
             this._appSettings = appSettings;
             this._logger = logger;
+            messageQueue = new CopyDataMessageQueue(
+                ResolveMessage,
+                exception => _logger.LogError(exception, "处理 WM_COPYDATA 失败"),
+                Math.Clamp(Environment.ProcessorCount / 2, 1, 4));
+            statistics = new LocalTaskStatistics(
+                Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs"),
+                _appSettings.Value.TaskName);
+            if (!statistics.TryLoad(out var statisticsLoadError))
+                _logger.LogWarning(statisticsLoadError, "加载本机任务统计失败，将从零继续累计");
+            InitializeComponent();
             FormClosing += MainForm_FormClosing;
             this.Text += $"{AppConsts.AppVertion}";
             this.sync = SynchronizationContext.Current;
@@ -339,7 +314,6 @@ namespace MainClient
             var isRestart = System.Environment.GetCommandLineArgs().Any(p => p.StartsWith("restart"));
             if (isRestart)
             {
-                LoadAppState();
                 sync.Post((p) =>
                 {
                     buttonStart.PerformClick();
@@ -479,105 +453,27 @@ namespace MainClient
         /// </summary>
         private void UpdateStatInfo()
         {
-
+            var snapshot = statistics.GetSnapshot();
+            var requests = snapshot.GetSessionValue(TaskStatisticNames.Requests);
+            var processed = snapshot.GetSessionValue(TaskStatisticNames.Processed);
             this.BeginInvoke(new Action(() =>
             {
-                label5.Text = $"请求数量:{this.RequestCount}";
-                if (this.RequestCount > 0)
-                    label6.Text = $"提交数量:{this.SuccessCount},{(this.SuccessCount / (double)this.RequestCount * 100):N1}%";
-
-                label7.Text = $"曝光数量:{this.DspCount}";
-                label8.Text = $"点击数量:{this.DspClickCount}";
+                label5.Text = $"获取任务:{snapshot.GetSessionValue(TaskStatisticNames.TasksFetched)} 请求数量:{requests}";
+                label6.Text = requests > 0
+                    ? $"处理数量:{processed},{processed / (double)requests * 100:N1}%"
+                    : "处理数量:0";
+                label7.Text = $"曝光数量:{snapshot.GetSessionValue(TaskStatisticNames.Exposures)}";
+                label8.Text = $"点击数量:{snapshot.GetSessionValue(TaskStatisticNames.Clicks)}";
                 toolStripStatusLabel2.Text = $"进程：{this.processOfList.Count()}";
-                toolStripStatusLabel3.Text = $"请求总量：{this.TotalRequestCount}";
-                toolStripStatusLabel4.Text = $"提交总量：{this.TotalSuccessCount}";
-                toolStripStatusLabel5.Text = $"曝光总量：{this.TotalDspCount}";
-                toolStripStatusLabel6.Text = $"点击总量：{this.TotalDspClickCount}";
+                toolStripStatusLabel3.Text = $"请求总量：{snapshot.GetTotalValue(TaskStatisticNames.Requests)}";
+                toolStripStatusLabel4.Text = $"处理总量：{snapshot.GetTotalValue(TaskStatisticNames.Processed)}";
+                toolStripStatusLabel5.Text = $"曝光总量：{snapshot.GetTotalValue(TaskStatisticNames.Exposures)}";
+                toolStripStatusLabel6.Text = $"点击总量：{snapshot.GetTotalValue(TaskStatisticNames.Clicks)}";
                 if (sw.IsRunning)
                 {
                     label9.Text = $"运行时间:{sw.Elapsed.Minutes}分{sw.Elapsed.Seconds}秒";
                 }
             }));
-        }
-
-        /// <summary>
-        /// 保存运行状态
-        /// </summary>
-        /// <returns></returns>
-        private void LoadAppState()
-        {
-            var runDatPath = @"Logs/run_" + System.DateTime.Today.ToString("yyyyMMdd") + "_" + _appSettings.Value.TaskName + ".dat";
-            if (System.IO.File.Exists(runDatPath))
-            {
-                var content = System.IO.File.ReadAllLines(runDatPath).LastOrDefault();
-                if (!string.IsNullOrWhiteSpace(content))
-                {
-                    var jo = (JObject)JsonConvert.DeserializeObject(content);
-                    if (jo["Task"].ToString().Equals(_appSettings.Value.TaskName))
-                    {
-                        this.TotalDspCount = Convert.ToInt32(jo["TotalDspCount"].ToString());
-                        if (jo.ContainsKey("TotalDspClickCount"))
-                        {
-                            this.TotalDspClickCount = Convert.ToInt32(jo["TotalDspClickCount"].ToString());
-                        }
-                        if (jo.ContainsKey("TotalRequestCount"))
-                        {
-                            this.TotalRequestCount = Convert.ToInt32(jo["TotalRequestCount"].ToString());
-                        }
-                        if (jo.ContainsKey("TotalSuccessCount"))
-                        {
-                            this.TotalSuccessCount = Convert.ToInt32(jo["TotalSuccessCount"].ToString());
-                        }
-
-
-                    }
-                }
-            }
-        }
-        /// <summary>
-        /// 保存运行状态
-        /// </summary>
-        /// <returns></returns>
-        private async Task SaveAppState()
-        {
-            Directory.CreateDirectory("./Logs");
-            var rundatFile = @"./Logs/run_" + System.DateTime.Today.ToString("yyyyMMdd") + "_" + _appSettings.Value.TaskName + ".dat";
-            var runData = JObject.FromObject(new
-            {
-                Task = _appSettings.Value.TaskName,
-                GetTaskCount,
-                TotalGetTaskCount,
-                RequestCount,
-                TotalRequestCount,
-                SuccessCount,
-                TotalSuccessCount,
-                DspCount,
-                TotalDspCount,
-                DspClickCount,
-                TotalDspClickCount,
-                LastDateTime = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
-            });
-            if (!System.IO.File.Exists(rundatFile))
-            {
-                runData = JObject.FromObject(new
-                {
-                    Task = _appSettings.Value.TaskName,
-                    GetTaskCount,
-                    TotalGetTaskCount = GetTaskCount,
-                    RequestCount,
-                    TotalRequestCount = RequestCount,
-                    SuccessCount,
-                    TotalSuccessCount = SuccessCount,
-                    DspCount,
-                    TotalDspCount = DspCount,
-                    DspClickCount,
-                    TotalDspClickCount = DspClickCount,
-                    LastDateTime = System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")
-                });
-                await System.IO.File.WriteAllTextAsync(rundatFile, $"{JsonConvert.SerializeObject(runData, Newtonsoft.Json.Formatting.None)}{System.Environment.NewLine}");
-            }
-            else
-                await System.IO.File.AppendAllTextAsync(rundatFile, $"{JsonConvert.SerializeObject(runData, Newtonsoft.Json.Formatting.None)}{System.Environment.NewLine}");
         }
 
         private async void buttonStart_Click(object sender, EventArgs e)
@@ -619,11 +515,7 @@ namespace MainClient
             isRestart = false;
             isRunning = true;
             CommonHelper.ClearAllErrorMsgDialog();
-            this.GetTaskCount = 0;
-            this.RequestCount = 0;
-            this.SuccessCount = 0;
-            this.DspCount = 0;
-            this.DspClickCount = 0;
+            statistics.ResetSession();
             this.mainWnd = (int)this.Handle;
             this.processOfList.Clear();
             sw.Reset();
@@ -694,7 +586,7 @@ namespace MainClient
                 try
                 {
                     await _adxHelper.UpdateTaskStat();
-                    await SaveAppState();
+                    await statistics.SaveAsync();
                 }
                 catch (Exception ex)
                 {
@@ -726,7 +618,10 @@ namespace MainClient
             {
                 UpdateStatInfo();
                 if (++ticks % 5 == 0)
+                {
                     await _adxHelper.UpdateTaskStat();
+                    await statistics.SaveAsync(token);
+                }
             }
         }
 
@@ -833,6 +728,7 @@ namespace MainClient
                                 int taskCount = tasks["task"].Count();
                                 if (taskCount > 0)
                                 {
+                                    statistics.Increment(TaskStatisticNames.TasksFetched, taskCount);
                                     AddTaskInfo(tasks["task"]);
                                     LogWriteLine($"新增加{tasks["task"].Count()}条任务");
                                     for (int i = 0; i < _appSettings.Value.Multiple; i++)
@@ -1280,9 +1176,8 @@ namespace MainClient
                     return false;
                 }
 
-                Interlocked.Increment(ref RequestCount);
-                Interlocked.Increment(ref TotalRequestCount);
-                exposure.AddAllCount(1);
+                statistics.Increment(TaskStatisticNames.Requests);
+                exposure.AddRequests();
 
                 JObject dev;
 
@@ -1353,8 +1248,12 @@ namespace MainClient
                     await SaveAdx(adx!, 1);
 
                 var cacheIndex = $"s{processIndex}_{uv}";
-                var clickJump = false;
-                double ctr;
+                var mayClick = !hasCheckedFirstAdxInCurrentTask && parsed.ClickRate > 0;
+                if (mayClick)
+                    hasCheckedFirstAdxInCurrentTask = true;
+
+                using var submission = exposure.ReserveSubmission(parsed.ClickRate, mayClick);
+                var clickJump = submission.Click;
 
                 var args = new JObject
                 {
@@ -1376,44 +1275,9 @@ namespace MainClient
                     ["uv"] = uv
                 };
 
-                // 这里需要让“决定点击、发送消息、更新计数”形成一个一致操作。
-                // 最佳做法是把这段原子逻辑移动到 exposure 类型内部。
-                lock (exposure)
-                {
-                    var projectedAdxCount = exposure.adxCount + 1;
-                    var projectedCtr = parsed.ClickRate > 0 && projectedAdxCount > 0
-                        ? ((exposure.pendingClick + 1) / (double)projectedAdxCount) * 100
-                        : 0;
-
-                    if (!hasCheckedFirstAdxInCurrentTask && parsed.ClickRate > 0)
-                    {
-                        hasCheckedFirstAdxInCurrentTask = true;
-
-                        if (parsed.ClickRate == 100 ||
-                            exposure.pendingClick == 0 ||
-                            exposure.adxCount == 0 ||
-                            projectedCtr < parsed.ClickRate)
-                        {
-                            clickJump = true;
-                        }
-                    }
-
-                    args["clickJump"] = clickJump;
-
-                    // 如果此方法可能长时间阻塞，建议改为带 ACK 的异步发送，
-                    // 再由 exposure 提供 Reserve/Commit/Rollback 方法。
-                    SendCefLoadMessage(runtime.Consumer, args);
-
-                    exposure.AddAdxCount(1);
-                    if (clickJump)
-                    {
-                        exposure.AddPendingClick(1);
-                    }
-
-                    ctr = parsed.ClickRate > 0 && exposure.adxCount > 0
-                        ? (exposure.pendingClick / (double)exposure.adxCount) * 100
-                        : 0;
-                }
+                args["clickJump"] = clickJump;
+                SendCefLoadMessage(runtime.Consumer, args);
+                submission.Commit();
 
                 LogWriteLine(
                     $"提交任务:{parsed.Title}" +
@@ -1421,11 +1285,9 @@ namespace MainClient
                     $"activity={runtime.Consumer.TaskCount}," +
                     $"os={os},proxy={network.ProxyServer}," +
                     $"realIp={network.RealIp},click={clickJump}," +
-                    $"点击比率={ctr:N2}%,{uv}/{parsed.TotalUv}");
+                    $"点击比率={submission.ClickThroughRate:N2}%,{uv}/{parsed.TotalUv}");
 
-                _adxHelper.UpdateTaskAll(parsed.TaskId, 1);
-                Interlocked.Increment(ref SuccessCount);
-                Interlocked.Increment(ref TotalSuccessCount);
+                statistics.Increment(TaskStatisticNames.Processed);
 
                 if (runtime.Consumer.TaskCount > parsed.TotalUv)
                 {

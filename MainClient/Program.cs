@@ -4,6 +4,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using Serilog;
+using Serilog.Events;
 using System.Configuration;
 using System.Diagnostics;
 
@@ -35,11 +37,20 @@ namespace MainClient
                     services.AddSingleton<IpHelper>();
                     services.AddTransient<MainForm>();
 
-                }).ConfigureLogging(logBuilder =>
-                {
-                    logBuilder.SetMinimumLevel(LogLevel.Trace);
-                    logBuilder.AddLog4Net("log4net.config");
-                });
+                })
+                .UseSerilog((_, _, loggerConfiguration) => loggerConfiguration
+                    .MinimumLevel.Verbose()
+                    .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
+                    .Enrich.FromLogContext()
+                    .Enrich.WithThreadId()
+                    .WriteTo.File(
+                        Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs", "main-.log"),
+                        rollingInterval: RollingInterval.Day,
+                        retainedFileCountLimit: 20,
+                        fileSizeLimitBytes: 200L * 1024 * 1024,
+                        rollOnFileSizeLimit: true,
+                        shared: true,
+                        outputTemplate: "记录时间：{Timestamp:yyyy-MM-dd HH:mm:ss} 线程ID:[{ThreadId}] 等级：[{Level:u3}] 操作信息：{Message:lj}{NewLine}{Exception}"));
             using var host = builder.Build();
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
             Application.ThreadException += (_, e) =>
