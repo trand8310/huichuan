@@ -39,7 +39,6 @@ namespace MainClient
 
 
         #region 任务调度管理
-
         private TaskDispatchManager _taskManager = default!;
         private void InitTaskDispatchManager()
         {
@@ -147,13 +146,15 @@ namespace MainClient
 
             };
         }
+        #endregion
+
 
         #region 状态变化事件：更新按钮文本
         private void TaskManager_StateChanged(
         object? sender,
         RunnerStateChangedEventArgs e)
         {
-            BeginInvokeSafe(() =>
+            this.InvokeOnUiThreadIfRequired(() =>
             {
                 RefreshStartStopButton(e.NewState);
             });
@@ -185,6 +186,8 @@ namespace MainClient
         }
 
         #endregion
+
+
 
         #region 日志事件
         private void TaskManager_LogEmitted(
@@ -280,20 +283,14 @@ namespace MainClient
         object? sender,
         PendingTasksPersistedEventArgs e)
         {
-            BeginInvokeSafe(() =>
-            {
-                AddLog($"剩余任务已落盘: Count={e.Count}, File={e.FilePath}");
-            });
+            LogWriteLine($"剩余任务已落盘: Count={e.Count}, File={e.FilePath}");
         }
 
         private void TaskManager_PersistedTasksLoaded(
             object? sender,
             PersistedTasksLoadedEventArgs e)
         {
-            BeginInvokeSafe(() =>
-            {
-                AddLog($"落盘任务已恢复: Count={e.Count}, File={e.FilePath}");
-            });
+            LogWriteLine($"落盘任务已恢复: Count={e.Count}, File={e.FilePath}");
         }
         #endregion
 
@@ -505,43 +502,8 @@ namespace MainClient
         }
         #endregion
 
-        private void AddLog(string message)
-        {
-            //if (IsDisposed)
-            //    return;
-
-            //var line = $"[{DateTime.Now:HH:mm:ss.fff}] {message}{Environment.NewLine}";
-
-            //if (LogTextBox.IsDisposed)
-            //    return;
-
-            //LogTextBox.AppendText(line);
-            // _logger.LogInformation(message);
-            LogWriteLine(message);
-        }
-
-        private void BeginInvokeSafe(Action action)
-        {
-            if (IsDisposed)
-                return;
-
-            if (InvokeRequired)
-            {
-                try
-                {
-                    BeginInvoke(action);
-                }
-                catch
-                {
-                }
-            }
-            else
-            {
-                action();
-            }
-        }
-        #endregion
-
+ 
+ 
 
 
 
